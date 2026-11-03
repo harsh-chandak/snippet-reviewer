@@ -1,4 +1,6 @@
+import { anthropicProvider } from './llm/anthropicProvider';
 import { claudeHeadlessProvider } from './llm/claudeHeadlessProvider';
+import { fakeProvider } from './llm/fakeProvider';
 import { buildReviewPrompt, REVIEW_SYSTEM_PROMPT } from './llm/prompt';
 import { findingValidator, LlmFinding, reviewJsonSchema } from './llm/reviewSchema';
 import { LlmError, LlmProvider } from './llm/types';
@@ -8,7 +10,11 @@ function pickProvider(): LlmProvider {
   switch (name) {
     case 'claude-headless':
       return claudeHeadlessProvider;
-    // case 'anthropic': return anthropicApiProvider;  (added when the API key arrives)
+    case 'anthropic':
+      return anthropicProvider;
+    // Tests only: answers are queued by the test, no model is called.
+    case 'fake':
+      return fakeProvider;
     default:
       throw new Error(`Unknown LLM_PROVIDER "${name}"`);
   }
