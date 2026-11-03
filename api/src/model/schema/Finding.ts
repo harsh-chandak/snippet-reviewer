@@ -33,8 +33,8 @@ Finding.init(
       defaultValue: 'open',
       validate: { isIn: [FINDING_STATUSES as unknown as string[]] },
     },
-    createdAt: DataTypes.DATE,
-    updatedAt: DataTypes.DATE,
+    createdAt: { type: DataTypes.DATE, allowNull: false },
+    updatedAt: { type: DataTypes.DATE, allowNull: false },
   },
   {
     sequelize: db,

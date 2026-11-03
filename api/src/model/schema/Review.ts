@@ -35,8 +35,8 @@ Review.init(
     rejectedCount: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
     startedAt: { type: DataTypes.DATE, allowNull: true, defaultValue: null },
     completedAt: { type: DataTypes.DATE, allowNull: true, defaultValue: null },
-    createdAt: DataTypes.DATE,
-    updatedAt: DataTypes.DATE,
+    createdAt: { type: DataTypes.DATE, allowNull: false },
+    updatedAt: { type: DataTypes.DATE, allowNull: false },
   },
   {
     sequelize: db,

@@ -1,8 +1,7 @@
-import * as dotenv from 'dotenv';
-dotenv.config();
-
+import './loadEnv';
 import app from './app';
 import db from './db/postgres';
+import { migrator } from './db/migrator';
 import './model/schema';
 import { reviewService } from './service/reviewService';
 
@@ -10,8 +9,8 @@ const port = Number(process.env.PORT) || 4000;
 
 async function start() {
   await db.authenticate();
-  // Creates missing tables once at startup. Production would use migrations instead.
-  await db.sync();
+  // Applies any migrations that haven't run yet, so a fresh database gets its tables.
+  await migrator.up();
 
   const interrupted = await reviewService.failInterrupted();
   if (interrupted) console.warn(`Marked ${interrupted} interrupted review(s) as failed`);

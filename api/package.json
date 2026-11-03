@@ -7,7 +7,10 @@
     "dev": "nodemon --watch src --ext ts --exec ts-node src/server.ts",
     "build": "rimraf ./dist && tsc",
     "start": "node dist/server.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "migrate": "ts-node src/migrate.ts up",
+    "migrate:down": "ts-node src/migrate.ts down",
+    "migrate:status": "ts-node src/migrate.ts pending"
   },
   "dependencies": {
     "cors": "^2.8.5",
@@ -16,7 +19,8 @@
     "joi": "^17.13.3",
     "pg": "^8.13.1",
     "pg-hstore": "^2.3.4",
-    "sequelize": "^6.37.5"
+    "sequelize": "^6.37.5",
+    "umzug": "^3.8.2"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",

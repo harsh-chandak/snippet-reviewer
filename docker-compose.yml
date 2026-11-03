@@ -6,7 +6,8 @@ services:
       POSTGRES_PASSWORD: snippets
       POSTGRES_DB: snippets
     ports:
-      - "5432:5432"
+      # Host port 5433, so it doesn't clash with a Postgres already installed on the machine.
+      - "${DB_HOST_PORT:-5433}:5432"
     volumes:
       - db-data:/var/lib/postgresql/data
     healthcheck:
@@ -17,7 +18,9 @@ services:
 
   api:
     build: ./api
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgres://snippets:snippets@db:5432/snippets
       PORT: 4000

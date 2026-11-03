@@ -26,8 +26,8 @@ Snippet.init(
       defaultValue: 'not_reviewed',
       validate: { isIn: [SNIPPET_REVIEW_STATUSES as unknown as string[]] },
     },
-    createdAt: DataTypes.DATE,
-    updatedAt: DataTypes.DATE,
+    createdAt: { type: DataTypes.DATE, allowNull: false },
+    updatedAt: { type: DataTypes.DATE, allowNull: false },
   },
   {
     sequelize: db,
