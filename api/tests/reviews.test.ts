@@ -120,6 +120,18 @@ describe('POST /snippets/:id/reviews', () => {
     expect(fakeProvider.lastInput?.prompt).toContain('1: x = 1\n2: \n3: print(x)');
   });
 
+  it('a final newline adds no numbered line, so a finding on it is dropped', async () => {
+    const snippet = await createSnippet({ language: 'python', code: 'x = 1\nprint(x)\n' });
+    fakeProvider.respondWith({ findings: [finding({ lineStart: 2, lineEnd: 2 }), finding({ lineStart: 3, lineEnd: 3 })] });
+
+    const review = await waitForReview((await startReview(snippet.id)).id);
+
+    expect(fakeProvider.lastInput?.prompt).toContain('1: x = 1\n2: print(x)\n</snippet>');
+    expect(review.findings).toHaveLength(1);
+    expect(review.findings[0]).toMatchObject({ lineStart: 2 });
+    expect(review.rejectedCount).toBe(1);
+  });
+
   it('a provider failure leaves the review failed with the LlmError message and the snippet failed', async () => {
     const snippet = await createSnippet();
     fakeProvider.failWith('The review timed out after 120s');

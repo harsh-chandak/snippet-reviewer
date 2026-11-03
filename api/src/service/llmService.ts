@@ -4,6 +4,7 @@ import { fakeProvider } from './llm/fakeProvider';
 import { buildReviewPrompt, REVIEW_SYSTEM_PROMPT } from './llm/prompt';
 import { findingValidator, LlmFinding, reviewJsonSchema } from './llm/reviewSchema';
 import { LlmError, LlmProvider } from './llm/types';
+import { codeLines } from '../utils/codeLines';
 
 function pickProvider(): LlmProvider {
   const name = process.env.LLM_PROVIDER || 'claude-headless';
@@ -45,7 +46,7 @@ class LlmService {
       throw new LlmError('The model returned an answer without a findings list');
     }
 
-    const lineCount = code.split('\n').length;
+    const lineCount = codeLines(code).length;
     const result: ReviewResult = { findings: [], rejected: [] };
 
     for (const item of items) {

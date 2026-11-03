@@ -1,8 +1,9 @@
+import { codeLines } from '@/lib/codeLines';
 import { MAX_CODE_CHARS, MAX_CODE_LINES } from '@/lib/types';
 
-// Counts the way the API does: lines are split on \n, characters are the string length.
+// Counts the way the API does (codeLines: a final newline adds no line); characters are the string length.
 export function countCode(code: string): { lines: number; chars: number } {
-  return { lines: code === '' ? 0 : code.split('\n').length, chars: code.length };
+  return { lines: code === '' ? 0 : codeLines(code).length, chars: code.length };
 }
 
 function Count({ value, max, unit }: { value: number; max: number; unit: string }) {

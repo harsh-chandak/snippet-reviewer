@@ -1,3 +1,5 @@
+import { codeLines } from '../../utils/codeLines';
+
 export const REVIEW_SYSTEM_PROMPT = [
   'You are a careful code reviewer.',
   'Report only real problems: bugs, security issues, performance problems, and style issues that matter.',
@@ -8,8 +10,7 @@ export const REVIEW_SYSTEM_PROMPT = [
 
 // Numbers each line so the model's line references match what the user sees.
 export function buildReviewPrompt(language: string, code: string): string {
-  const numbered = code
-    .split('\n')
+  const numbered = codeLines(code)
     .map((line, i) => `${i + 1}: ${line}`)
     .join('\n');
 

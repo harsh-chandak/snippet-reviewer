@@ -1,5 +1,6 @@
 'use client';
 
+import { codeLines } from '@/lib/codeLines';
 import { Fragment, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import type { Finding, FindingStatus, Language } from '@/lib/types';
@@ -26,8 +27,8 @@ export function CodeView({
   findingErrors: Readonly<Record<number, string>>;
   onSetFindingStatus: (findingId: number, status: FindingStatus) => void;
 }) {
-  // Split exactly as the API does (code.split('\n')), so line N here is line N there.
-  const lines = useMemo(() => code.split('\n').map((l) => l.replace(/\r$/, '')), [code]);
+  // Split exactly as the API does (codeLines), so line N here is line N there.
+  const lines = useMemo(() => codeLines(code).map((l) => l.replace(/\r$/, '')), [code]);
   const tokens = useHighlightedLines(code, language);
 
   // lineEnd -> the findings whose card sits under that line (several stack in API order),

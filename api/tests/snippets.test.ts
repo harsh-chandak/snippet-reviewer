@@ -69,6 +69,14 @@ describe('POST /snippets', () => {
     expect(over.body.data).toEqual({ code: ['code must be at most 1000 lines'] });
   });
 
+  it('does not count a final newline as an extra line', async () => {
+    const lines = (n: number) => Array.from({ length: n }, (_, i) => `x${i}`).join('\n');
+
+    // 1000 lines saved by an editor end with a newline; that is still 1000 lines.
+    const saved = await api().post(`${V1}/snippets`).send({ title: 'Saved file', language: 'go', code: lines(1000) + '\n' });
+    expect(saved.status).toBe(201);
+  });
+
   it('accepts code at the character limit and refuses code one character over it', async () => {
     const atLimit = await api().post(`${V1}/snippets`).send({ title: 'Wide', language: 'go', code: 'x'.repeat(20000) });
     expect(atLimit.status).toBe(201);
