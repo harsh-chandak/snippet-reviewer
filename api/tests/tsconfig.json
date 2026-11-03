@@ -1,0 +1,12 @@
+{
+  // Typechecks the tests (the root tsconfig only covers src/, which is what gets built).
+  // Run with: npx tsc --noEmit -p tests
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["./**/*.ts", "../src/**/*.ts", "../vitest.config.ts"],
+  "exclude": []
+}
