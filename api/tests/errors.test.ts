@@ -16,19 +16,15 @@ describe('error responses', () => {
     expect(res.body).toEqual({ message: 'ok', data: { db: 'up' }, success: true });
   });
 
-  // KNOWN BUG (not fixed here: src/middleware/errorHandler.ts is owned by another unit).
-  // express.json() rejects a malformed body with a 400 error (err.status / err.type =
-  // 'entity.parse.failed'), but errorHandler only keeps the status of HttpError, so the
-  // client's mistake comes back as 500 "Internal Server Error" and is logged as a server fault.
-  it('KNOWN BUG: answers 400, not 500, for a malformed JSON body', async () => {
+  // express.json() rejects a malformed body with 400; the error handler must keep that status.
+  it('answers 400, not 500, for a malformed JSON body', async () => {
     const res = await api().post(`${V1}/snippets`).set('content-type', 'application/json').send('{"title": ');
     expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
   });
 
-  // KNOWN BUG, same cause: a body over the 1mb express.json limit is a 413 from body-parser,
-  // reshaped into a 500 by errorHandler.
-  it('KNOWN BUG: answers 413, not 500, for a body over the size limit', async () => {
+  // A body over the 1mb express.json limit is a 413.
+  it('answers 413, not 500, for a body over the size limit', async () => {
     const res = await api()
       .post(`${V1}/snippets`)
       .send({ title: 'big', language: 'go', code: 'x'.repeat(1_100_000) });
