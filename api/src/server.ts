@@ -3,14 +3,19 @@ dotenv.config();
 
 import app from './app';
 import db from './db/postgres';
+import './model/schema';
+import { reviewService } from './service/reviewService';
 
 const port = Number(process.env.PORT) || 4000;
 
 async function start() {
   await db.authenticate();
-  // Creates missing tables once at startup, for the models imported before this line.
-  // Production would use migrations instead.
+  // Creates missing tables once at startup. Production would use migrations instead.
   await db.sync();
+
+  const interrupted = await reviewService.failInterrupted();
+  if (interrupted) console.warn(`Marked ${interrupted} interrupted review(s) as failed`);
+
   app.listen(port, () => {
     console.log(`API listening on http://localhost:${port}`);
   });
