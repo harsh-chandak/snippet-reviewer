@@ -7,6 +7,7 @@ import type { CodeContext, Language, Review, ReviewStep } from '@/lib/types';
 import { StepEvents, useReviewEvents } from './ReviewEvents';
 import { Spinner } from './Spinner';
 import { isActive } from './useSnippetReview';
+import { formatDuration, formatUsd } from './format';
 
 type StepState = 'waiting' | 'running' | 'done' | 'failed' | 'skipped';
 
@@ -20,13 +21,8 @@ function plural(n: number, one: string, many = `${one}s`) {
   return `${n} ${n === 1 ? one : many}`;
 }
 
-// 850 ms, 4.2 s, 1m 05s.
-export function formatMs(ms: number): string {
-  if (ms < 1000) return `${Math.round(ms)} ms`;
-  if (ms < 60000) return `${(ms / 1000).toFixed(1)} s`;
-  const s = Math.round(ms / 1000);
-  return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
-}
+// Kept as a name for existing imports; the one time format lives in ./format.
+export const formatMs = formatDuration;
 
 // A review that finished before phases existed (a migrated row: no timings, no static
 // result) has no steps to show; drawing ticks and "0 rule findings" for a static step that
@@ -204,6 +200,9 @@ function StepList({ review, language }: { review: Review; language: Language }) 
             {expandable ? (
               <button
                 type="button"
+                aria-label={[STEP_LABELS[step], STATE_WORDS[state], detail, ms !== undefined ? formatDuration(ms) : null]
+                  .filter(Boolean)
+                  .join(', ')}
                 aria-expanded={isOpen}
                 aria-controls={isOpen ? panelId : undefined}
                 onClick={() => toggle(step)}
@@ -247,14 +246,6 @@ function ContextLine({ review, snippetContext }: { review: Review; snippetContex
 
 function count(n: number): string {
   return n.toLocaleString('en-US');
-}
-
-// $0.007, $0.042, $1.25. Never rounds a real cost down to $0.
-function formatUsd(usd: number): string {
-  if (usd === 0) return '$0';
-  if (usd >= 1) return `$${usd.toFixed(2)}`;
-  if (usd >= 0.01) return `$${usd.toFixed(3)}`;
-  return `$${Number(usd.toPrecision(2))}`;
 }
 
 // '1,950 in (1,948 written to cache · 0 read from cache · 2 uncached) · 407 out · 5.8 s ·
