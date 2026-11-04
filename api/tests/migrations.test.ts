@@ -4,13 +4,14 @@ import db from '../src/db/postgres';
 import { migrator } from '../src/db/migrator';
 
 // The test database was built by globalSetup with every migration. This file takes 004 down to 003,
-// 005 down to 004 and 006 down to 005, and up again, on its own database (TEST_DATABASE_NAME), and checks the
+// 005 down to 004, 006 down to 005 and 007 down to 006, and up again, on its own database (TEST_DATABASE_NAME), and checks the
 // columns, CHECKs and views each way. It ends with every migration applied, so other files that run
 // after it see the full schema.
 
 const M004 = '004-static-analysis.ts';
 const M005 = '005-review-events.ts';
 const M006 = '006-event-fixes.ts';
+const M007 = '007-analysis-error.ts';
 
 const NEW_COLUMNS: Record<string, Record<string, { type: string; nullable: boolean; default: string | null }>> = {
   reviews: {
@@ -106,7 +107,7 @@ afterAll(async () => {
 describe('migration 004-static-analysis', () => {
   it('is applied by the test setup, with the decided columns, defaults and CHECKs', async () => {
     expect(await executed()).toContain(M004);
-    expect((await executed()).at(-1)).toBe(M006);
+    expect((await executed()).at(-1)).toBe(M007);
     await expectSchemaAt004();
   });
 
@@ -179,7 +180,7 @@ describe('migration 004-static-analysis', () => {
     );
 
     await migrator.up();
-    expect((await executed()).at(-1)).toBe(M006);
+    expect((await executed()).at(-1)).toBe(M007);
     await expectSchemaAt004();
 
     const rows = await db.query<{ status: string; phase: string }>('SELECT status, phase FROM reviews ORDER BY id', {
@@ -411,7 +412,7 @@ describe('migration 005-review-events', () => {
 
   it('goes up again', async () => {
     await migrator.up();
-    expect((await executed()).at(-1)).toBe(M006);
+    expect((await executed()).at(-1)).toBe(M007);
     await expectSchemaAt005();
   });
 });
@@ -453,7 +454,7 @@ const select = (sql: string) => db.query<Record<string, any>>(sql, { type: Query
 
 describe('migration 006-event-fixes', () => {
   it('is applied by the test setup', async () => {
-    expect((await executed()).at(-1)).toBe(M006);
+    expect((await executed()).at(-1)).toBe(M007);
   });
 
   it('PIPE-7: v_review_costs sums tokens as bigint, so one review past 2^31 does not break the view', async () => {
@@ -513,7 +514,30 @@ describe('migration 006-event-fixes', () => {
 
   it('goes up again', async () => {
     await migrator.up();
-    expect((await executed()).at(-1)).toBe(M006);
+    expect((await executed()).at(-1)).toBe(M007);
     expect((await select('SELECT * FROM v_model_rejections')).map((r) => r.count)).toEqual([601, 5]);
+  });
+});
+
+describe('migration 007-analysis-error', () => {
+  it('is applied by the test setup: reviews.analysisError varchar(500) null, default NULL', async () => {
+    expect((await executed()).at(-1)).toBe(M007);
+    expect((await columns('reviews')).analysisError).toEqual({ type: 'character varying(500)', nullable: true, default: 'NULL::character varying' });
+  });
+
+  it('goes down to 006, dropping the column and keeping the reviews', async () => {
+    await db.query('TRUNCATE TABLE review_events, findings, reviews, snippets RESTART IDENTITY CASCADE');
+    const id = await insertReview({});
+    await db.query(`UPDATE reviews SET "analysisError" = 'it took longer than 5 s' WHERE id = :id`, { replacements: { id } });
+    await migrator.down({ to: M007 });
+    expect((await executed()).at(-1)).toBe(M006);
+    expect((await columns('reviews')).analysisError).toBeUndefined();
+    expect(await select('SELECT id FROM reviews')).toEqual([{ id }]);
+  });
+
+  it('goes up again, with the column null on old rows', async () => {
+    await migrator.up();
+    expect((await executed()).at(-1)).toBe(M007);
+    expect(await select('SELECT "analysisError" FROM reviews')).toEqual([{ analysisError: null }]);
   });
 });

@@ -111,16 +111,20 @@ export function collectImports(root: Node): ImportInfo {
 // The dotted name an expression refers to, with imports resolved: `np.load` -> 'numpy.load',
 // `run` (from subprocess import run) -> 'subprocess.run', `eval` -> 'eval'. Null for anything
 // that isn't a plain name or attribute chain (a call result, a subscript, ...).
+// Walks the chain in a loop, not by recursion: a valid `a.b.b.b...` thousands of attributes long
+// overflowed the stack (STA-10).
 export function qualifiedName(node: Node, imports: ImportMap): string | null {
-  if (node.type === 'identifier') return imports.get(node.text) ?? node.text;
-  if (node.type === 'attribute') {
-    const object = node.childForFieldName('object');
-    const attribute = node.childForFieldName('attribute');
+  const attributes: string[] = [];
+  let current = node;
+  while (current.type === 'attribute') {
+    const object = current.childForFieldName('object');
+    const attribute = current.childForFieldName('attribute');
     if (!object || !attribute) return null;
-    const base = qualifiedName(object, imports);
-    return base ? `${base}.${attribute.text}` : null;
+    attributes.push(attribute.text);
+    current = object;
   }
-  return null;
+  if (current.type !== 'identifier') return null;
+  return [imports.get(current.text) ?? current.text, ...attributes.reverse()].join('.');
 }
 
 // A call's keyword argument by name, e.g. shell in `run(cmd, shell=True)`.

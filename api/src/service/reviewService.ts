@@ -7,9 +7,10 @@ import { ReviewUpdate } from '../model/dao/ReviewDao';
 import type { PhaseTimings } from '../model/schema/Review';
 import { llmService, LlmUsage } from './llmService';
 import { LlmError } from './llm/types';
-import { analyzeSnippet } from './analysis';
-import { checkFix } from './analysis/fixCheck';
-import { AnalysisResult, FixReplacement, RuleFinding } from './analysis/types';
+import { analyzerFor } from './analysis';
+import { FixCheckInput, FixCheckResult, notChecked } from './analysis/fixCheck';
+import { runGuarded } from './analysis/guard';
+import { AnalysisResult } from './analysis/types';
 import { HttpError } from '../utils/httpError';
 import { CodeContext, FindingSource, Language, ReviewPhase } from '../model/constants';
 import { toUserMessage } from '../utils/userMessage';
@@ -73,23 +74,64 @@ function failedTimings(timings: PhaseTimings, phase: ReviewPhase): PhaseTimings 
   return isStepPhase(phase) ? { ...timings, failedPhase: phase } : { ...timings };
 }
 
-// The same rule hit, found by both runs of the analyzer.
-const ruleKey = (f: RuleFinding) => `${f.ruleId}:${f.lineStart}`;
+// The static step (analysis/review.ts: parse, detect, run the rules for the detected and the
+// user's context) in a worker with the time and heap limits (the decision 'static analysis
+// limits'). If it stops, the review goes on model-only: no rule findings, the user's context or
+// 'unknown', and analysisError says why in plain words.
+async function staticStep(
+  reviewId: number,
+  language: Language,
+  code: string,
+  userContext: CodeContext | null,
+): Promise<{ analysis: AnalysisResult; analysisError: string | null }> {
+  const started = Date.now();
+  const run = await runGuarded<AnalysisResult>(
+    { kind: 'analyze', language, code, userContext },
+    { label: `review ${reviewId} static analysis` },
+  );
+  if (run.ok) return { analysis: run.value, analysisError: null };
+  const context = userContext ?? 'unknown';
+  return {
+    analysis: {
+      supported: analyzerFor(language) !== null,
+      parseOk: false,
+      parseError: null,
+      detected: { context, signals: [] },
+      context,
+      outline: [],
+      findings: [],
+      durationMs: Date.now() - started,
+    },
+    analysisError: run.reason.slice(0, 500), // the column is varchar(500)
+  };
+}
 
-// The static step. A user-set context can add rules, never remove them (the decision 'user context
-// and rules'): when it differs from the detected one, the rules run for both contexts and the
-// findings are merged, one per (ruleId, lineStart), in line order. The result's context is the
-// user's choice; its detected signals are what detection saw.
-async function analyzeForReview(language: Language, code: string, userContext: CodeContext | null): Promise<AnalysisResult> {
-  const chosen = await analyzeSnippet(language, code, userContext ?? undefined);
-  if (!userContext || userContext === chosen.detected.context) return chosen;
-  const detected = await analyzeSnippet(language, code);
-  const seen = new Set(chosen.findings.map(ruleKey));
-  const findings = [...chosen.findings, ...detected.findings.filter((f) => !seen.has(ruleKey(f)))]
-    .map((f, i) => ({ f, i }))
-    .sort((a, b) => a.f.lineStart - b.f.lineStart || a.i - b.i)
-    .map(({ f }) => f);
-  return { ...chosen, findings, durationMs: chosen.durationMs + detected.durationMs };
+// The checking step: every finding's fix (rule findings first, then the model's) checked in a
+// worker under the same limits, at most MAX_FIX_CHECKS of them, against one analysis of the
+// unfixed code (the decision 'fix check budget'). Results that arrived before a cut-off are kept;
+// the rest are not_checked with the reason. Returns one entry per input, undefined where there is
+// no fix. When the static step already stopped on this code, the fixes are not checked at all.
+async function checkingStep(
+  reviewId: number,
+  inputs: FixCheckInput[],
+  code: string,
+  language: Language,
+  analysisError: string | null,
+): Promise<(CheckedFix | undefined)[]> {
+  const results: (FixCheckResult | null | undefined)[] = new Array(inputs.length).fill(undefined);
+  let stopped: string | null = analysisError ? 'not checked: static analysis stopped on this code' : null;
+  if (!stopped && inputs.some((i) => i.fix)) {
+    const run = await runGuarded<null>(
+      { kind: 'checkFixes', language, code, fixes: inputs },
+      { label: `review ${reviewId} fix checks`, onFix: (index, result) => (results[index] = result) },
+    );
+    if (!run.ok) stopped = `not checked: the fix checks stopped (${run.reason})`;
+  }
+  return inputs.map((input, i) => {
+    if (!input.fix) return undefined;
+    const result = results[i] ?? notChecked(stopped ?? 'not checked');
+    return { fixCheck: result.fixCheck, fixCheckDetail: result.detail };
+  });
 }
 
 function usageColumns(usage: LlmUsage | null): ReviewUpdate {
@@ -154,7 +196,9 @@ class ReviewService {
   //
   // Phases: static (parse, detect the context, run the rules; rule findings are saved when it ends,
   // so the page shows them while the model runs) -> model (the model gets the context, outline and
-  // rule findings) -> checking (every finding with a fix gets it checked) -> done. A failure in any
+  // rule findings) -> checking (each fix is checked, at most MAX_FIX_CHECKS per review) -> done. The
+  // static and checking work runs in a worker under the time and heap limits (analysis/guard.ts);
+  // a static step that stops leaves the review model-only, never failed. A failure in any
   // phase fails the review; rule findings already saved stay.
   //
   // Each step's events go into the review's event log in the same transaction that saves the
@@ -177,7 +221,7 @@ class ReviewService {
       phase = 'static';
 
       let phaseStart = Date.now();
-      const analysis = await analyzeForReview(language, code, snippet.context);
+      const { analysis, analysisError } = await staticStep(reviewId, language, code, snippet.context);
       timings.static = Date.now() - phaseStart;
       const context = analysis.context;
       // What detection saw, also when the user chose another context: their choice is on the
@@ -185,25 +229,23 @@ class ReviewService {
       const signals = analysis.detected.signals;
 
       const ruleRows = await db.transaction(async (transaction) => {
-        const moved = await reviewDao.updateIfStatus(
-          reviewId,
-          ['running'],
-          {
-            phase: 'model',
-            phaseTimings: { ...timings },
-            context,
-            contextSignals: signals,
-            staticSupported: analysis.supported,
-          },
-          transaction,
-        );
+        const toModel: ReviewUpdate & { analysisError: string | null } = {
+          phase: 'model',
+          phaseTimings: { ...timings },
+          context,
+          contextSignals: signals,
+          staticSupported: analysis.supported,
+          analysisError,
+        };
+        const moved = await reviewDao.updateIfStatus(reviewId, ['running'], toModel, transaction);
         if (!moved) throw new SupersededError();
         const rows = await findingDao.createRuleFindings(reviewId, analysis.findings, transaction);
         events.add(
           event('static.parsed', {
             supported: analysis.supported,
             parseOk: analysis.parseOk,
-            parseError: analysis.parseError,
+            // When the analysis stopped, whether the code parses is not known; the reason is logged here.
+            parseError: analysisError ? `static analysis stopped: ${analysisError}` : analysis.parseError,
             context,
             signals,
             outlineItems: analysis.outline.length,
@@ -293,22 +335,13 @@ class ReviewService {
       // checking
       phaseStart = Date.now();
       // The finding's own lines go with it, so a model fix that strays from them fails (model fix locality).
-      const check = (
-        source: FindingSource,
-        ruleId: string | null,
-        f: { fix?: FixReplacement | null; lineStart: number; lineEnd: number },
-      ) =>
-        f.fix
-          ? this.checkOne(
-              reviewId,
-              { source, ruleId, fix: f.fix, lineStart: f.lineStart, lineEnd: f.lineEnd },
-              code,
-              language,
-              context,
-            )
-          : Promise.resolve(undefined);
-      const ruleChecks = await Promise.all(analysis.findings.map((f) => check('rule', f.ruleId, f)));
-      const modelChecks = await Promise.all(modelResult.findings.map((f) => check('model', null, f)));
+      const inputs: FixCheckInput[] = [
+        ...analysis.findings.map((f) => ({ source: 'rule' as const, ruleId: f.ruleId, fix: f.fix, lineStart: f.lineStart, lineEnd: f.lineEnd })),
+        ...modelResult.findings.map((f) => ({ source: 'model' as const, ruleId: null, fix: f.fix ?? null, lineStart: f.lineStart, lineEnd: f.lineEnd })),
+      ];
+      const checks = await checkingStep(reviewId, inputs, code, language, analysisError);
+      const ruleChecks = checks.slice(0, analysis.findings.length);
+      const modelChecks = checks.slice(analysis.findings.length);
       timings.checking = Date.now() - phaseStart;
 
       // done
@@ -377,23 +410,6 @@ class ReviewService {
           await events.flush(transaction);
         })
         .catch((saveErr) => console.error(`[review ${reviewId}] could not record failure`, saveErr));
-    }
-  }
-
-  // A fix checker that throws must not cost the review its findings: that fix is just not checked.
-  private async checkOne(
-    reviewId: number,
-    finding: { source: FindingSource; ruleId: string | null; fix: FixReplacement; lineStart: number; lineEnd: number },
-    code: string,
-    language: Language,
-    context: CodeContext,
-  ): Promise<CheckedFix> {
-    try {
-      const { fixCheck, detail } = await checkFix(finding, code, language, context);
-      return { fixCheck, fixCheckDetail: detail };
-    } catch (err) {
-      console.error(`[review ${reviewId}] fix check failed for ${finding.ruleId ?? 'a model finding'}`, err);
-      return { fixCheck: 'not_checked', fixCheckDetail: null };
     }
   }
 

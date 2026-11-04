@@ -64,10 +64,15 @@ function isPlainString(node: Node): boolean {
   return STRING_TYPES.has(node.type) && !isFString(node);
 }
 
-function isConstant(node: Node): boolean {
-  if (node.type === 'parenthesized_expression') return namedChildren(node).every(isConstant);
-  if (node.type === 'tuple') return namedChildren(node).every(isConstant);
-  return isPlainString(node) || LITERAL_TYPES.has(node.type);
+// Iterative, like plusOperands and qualifiedName: deeply nested valid code must not overflow the stack.
+function isConstant(root: Node): boolean {
+  const stack = [root];
+  while (stack.length) {
+    const node = stack.pop()!;
+    if (node.type === 'parenthesized_expression' || node.type === 'tuple') stack.push(...namedChildren(node));
+    else if (!isPlainString(node) && !LITERAL_TYPES.has(node.type)) return false;
+  }
+  return true;
 }
 
 function unwrap(node: Node): Node {
@@ -84,13 +89,20 @@ function operatorOf(node: Node): string | null {
 
 // The operands of a chain of `+`: a + b + c -> [a, b, c].
 function plusOperands(node: Node): Node[] {
-  const n = unwrap(node);
-  if (n.type === 'binary_operator' && operatorOf(n) === '+') {
-    const left = n.childForFieldName('left');
-    const right = n.childForFieldName('right');
-    return [...(left ? plusOperands(left) : []), ...(right ? plusOperands(right) : [])];
+  const out: Node[] = [];
+  const stack = [node]; // right operands are pushed first, so operands come out left to right
+  while (stack.length) {
+    const n = unwrap(stack.pop()!);
+    if (n.type === 'binary_operator' && operatorOf(n) === '+') {
+      const left = n.childForFieldName('left');
+      const right = n.childForFieldName('right');
+      if (right) stack.push(right);
+      if (left) stack.push(left);
+    } else {
+      out.push(n);
+    }
   }
-  return [n];
+  return out;
 }
 
 // How a string was built from values at run time, in plain words, or null if it wasn't.
@@ -125,12 +137,18 @@ function stringBuilding(raw: Node): string | null {
 
 // The last assignment to `name` in the same function (or module) before `before`, when it built
 // a string from values; `q += f"... {x}"` counts too.
-function builtVariable(name: string, before: Node): { how: string; node: Node } | null {
+// `scopes` caches each scope's own assignments for one rule run: walking the scope again for every
+// .execute() call made the rule quadratic in the size of the code (STA-2).
+function builtVariable(name: string, before: Node, scopes: Map<number, Node[]>): { how: string; node: Node } | null {
   const scope = enclosingScope(before);
+  let assignments = scopes.get(scope.id);
+  if (!assignments) {
+    assignments = descendants(scope, ['assignment', 'augmented_assignment']).filter((a) => enclosingScope(a).id === scope.id);
+    scopes.set(scope.id, assignments);
+  }
   let found: { how: string; node: Node } | null = null;
-  for (const assign of descendants(scope, ['assignment', 'augmented_assignment'])) {
-    if (assign.startIndex >= before.startIndex) continue;
-    if (enclosingScope(assign).id !== scope.id) continue;
+  for (const assign of assignments) {
+    if (assign.startIndex >= before.startIndex) break; // in document order
     const left = assign.childForFieldName('left');
     const right = assign.childForFieldName('right');
     if (left?.type !== 'identifier' || left.text !== name || !right) continue;
@@ -151,6 +169,7 @@ const sqlStringConcat: PythonRule = {
   contexts: 'all',
   run({ root, src }) {
     const out: RuleFinding[] = [];
+    const scopes = new Map<number, Node[]>();
     for (const call of calls(root)) {
       const fn = call.childForFieldName('function');
       const method = fn?.type === 'attribute' ? fn.childForFieldName('attribute')?.text : null;
@@ -160,7 +179,7 @@ const sqlStringConcat: PythonRule = {
       let how = stringBuilding(query);
       let where = '';
       if (!how && unwrap(query).type === 'identifier') {
-        const built = builtVariable(unwrap(query).text, call);
+        const built = builtVariable(unwrap(query).text, call, scopes);
         if (built) {
           how = built.how;
           where = ` (\`${unwrap(query).text}\` is built on line ${src.startLine(built.node)})`;

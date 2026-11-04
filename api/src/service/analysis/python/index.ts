@@ -1,5 +1,6 @@
 import { Node } from 'web-tree-sitter';
 import { CodeContext } from '../../../model/constants';
+import { AnalysisLimitError } from '../limits';
 import { AnalysisOutput, LanguageAnalyzer, OutlineItem, RuleFinding } from '../types';
 import { detectContext } from './context';
 import { findSyntaxError, withTree } from './parser';
@@ -51,11 +52,23 @@ function syntaxErrorFinding(line: number, message: string): RuleFinding {
   };
 }
 
+// The helpers walk long chains in loops, but the rules still recurse over the tree in places; code
+// nested deeply enough to overflow the stack is refused in plain words instead of failing the
+// review with a RangeError (STA-10). The review then goes on model-only.
+async function guardDepth<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (err) {
+    if (err instanceof RangeError) throw new AnalysisLimitError('the code is nested too deeply to analyze');
+    throw err;
+  }
+}
+
 export const pythonAnalyzer: LanguageAnalyzer = {
   languages: ['python'],
 
   async analyze(code: string, _language, context?: CodeContext): Promise<AnalysisOutput> {
-    return withTree(code, (tree) => {
+    return guardDepth(() => withTree(code, (tree) => {
       const root = tree.rootNode;
       const src = new SourceLines(code);
       const imports = collectImports(root);
@@ -69,14 +82,14 @@ export const pythonAnalyzer: LanguageAnalyzer = {
       }
       const findings = runRules({ root, src, imports }, context ?? detected.context);
       return { parseOk: true, parseError: null, detected, outline: items, findings };
-    });
+    }));
   },
 
   async parses(code: string) {
-    return withTree(code, (tree) => {
+    return guardDepth(() => withTree(code, (tree) => {
       const src = new SourceLines(code);
       const error = findSyntaxError(tree.rootNode, (n) => src.startLine(n));
       return error ? { ok: false, error: error.message } : { ok: true, error: null };
-    });
+    }));
   },
 };

@@ -41,19 +41,17 @@ const PYTHON2_STATEMENTS: Record<string, string> = {
 };
 
 // The first ERROR or MISSING node in document order, or null when the tree has none.
+// Depth-first with an explicit stack, so deeply nested code can't overflow the call stack.
 function firstErrorNode(root: Node): Node | null {
   if (!root.hasError) return null;
-  const visit = (node: Node): Node | null => {
+  const stack: Node[] = [root];
+  while (stack.length) {
+    const node = stack.pop()!;
     if (node.isError || node.isMissing) return node;
-    for (const child of node.children) {
-      if (child && (child.hasError || child.isMissing)) {
-        const found = visit(child);
-        if (found) return found;
-      }
-    }
-    return null;
-  };
-  return visit(root) ?? root;
+    const next = node.children.filter((c): c is Node => !!c && (c.hasError || c.isMissing));
+    for (let i = next.length - 1; i >= 0; i--) stack.push(next[i]);
+  }
+  return root;
 }
 
 // The first reason the code won't run as Python 3, in plain words with its 1-based line,

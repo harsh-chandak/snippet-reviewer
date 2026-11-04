@@ -41,6 +41,9 @@ class Review extends Model<InferAttributes<Review>, InferCreationAttributes<Revi
   declare contextSignals: CreationOptional<string[]>;
   // false: no static rules for this language, the review is model-only. null until the static phase ends.
   declare staticSupported: CreationOptional<boolean | null>;
+  // Why the static step stopped (out of time or memory, or the analyzer failed), in plain words;
+  // the review then went on model-only with no rule findings. Null when it finished (migration 007).
+  declare analysisError: CreationOptional<string | null>;
   // Model findings dropped because a rule had already reported them.
   declare duplicateCount: CreationOptional<number>;
   // What the model call used. Null when the provider reported nothing (or the model never ran).
@@ -90,6 +93,7 @@ Review.init(
     },
     contextSignals: { type: DataTypes.JSONB, allowNull: false, defaultValue: [] },
     staticSupported: { type: DataTypes.BOOLEAN, allowNull: true, defaultValue: null },
+    analysisError: { type: DataTypes.STRING(500), allowNull: true, defaultValue: null },
     duplicateCount: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
     model: { type: DataTypes.STRING(80), allowNull: true, defaultValue: null },
     inputTokens: { type: DataTypes.INTEGER, allowNull: true, defaultValue: null },

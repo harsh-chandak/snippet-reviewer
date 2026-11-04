@@ -2,6 +2,7 @@ import { CodeContext, FindingSource, FixCheck, Language } from '../../model/cons
 import { codeLines } from '../../utils/codeLines';
 import { COMMON_RULE_IDS } from './common';
 import { analyzerFor, analyzeSnippet } from './index';
+import { MAX_FIX_CHECKS, OVER_FIX_LIMIT_NOTE } from './limits';
 import { FixReplacement, RuleFinding } from './types';
 
 export interface FixCheckDetail {
@@ -108,6 +109,13 @@ const isSyntaxError = (ruleId: string) => ruleId.endsWith('/syntax-error');
 // code a fix brings in is checked even when its rules are off for this kind of snippet.
 const ALL_RULES_CONTEXT: CodeContext = 'unknown';
 
+export type FixCheckResult = { fixCheck: FixCheck; detail: FixCheckDetail | null };
+
+// The unfixed code's rule findings with every rule on: what each fix check compares against.
+export async function analyseUnfixed(code: string, language: Language): Promise<RuleFinding[]> {
+  return (await analyzeSnippet(language, code, ALL_RULES_CONTEXT)).findings;
+}
+
 // The finding a fix belongs to. lineStart/lineEnd are the finding's lines; a model fix is held to
 // them (the locality rule) when they are given.
 export interface FixCheckInput {
@@ -125,12 +133,15 @@ export interface FixCheckInput {
 // 'failed' when one doesn't, 'not_checked' when there is no fix, or no analyzer and nothing failed.
 // Never throws: an analyzer error comes back as 'not_checked' with the error in the note.
 // `_context` is accepted for the caller's sake and ignored: the check always runs every rule.
+// `before` is the unfixed code's rule findings with every rule on (analyseUnfixed), computed once
+// per review and passed to every check (the decision 'fix check budget'); without it, it is computed here.
 export async function checkFix(
   finding: FixCheckInput,
   code: string,
   language: Language,
   _context?: CodeContext,
-): Promise<{ fixCheck: FixCheck; detail: FixCheckDetail | null }> {
+  before?: RuleFinding[],
+): Promise<FixCheckResult> {
   const { fix } = finding;
   if (!fix) return { fixCheck: 'not_checked', detail: null };
 
@@ -148,16 +159,14 @@ export async function checkFix(
       : null;
 
   try {
-    const [before, after] = await Promise.all([
-      analyzeSnippet(language, code, ALL_RULES_CONTEXT),
-      analyzeSnippet(language, fixed, ALL_RULES_CONTEXT),
-    ]);
+    const beforeFindings = before ?? (await analyseUnfixed(code, language));
+    const after = await analyzeSnippet(language, fixed, ALL_RULES_CONTEXT);
 
     const analyzer = analyzerFor(language);
     if (!analyzer) {
       // No parser for the language, but the language-agnostic rules (any/hardcoded-secret) still
       // run on every snippet, so a fix that adds one of their hits is failed.
-      const newRuleIds = newIssues(before.findings, after.findings);
+      const newRuleIds = newIssues(beforeFindings, after.findings);
       const notes = [`There is no parser for ${language}, so whether the fixed code parses was not checked`];
       if (locality) notes.push(locality);
       notes.push(
@@ -178,7 +187,7 @@ export async function checkFix(
       ? !after.findings.some((f) => f.ruleId === finding.ruleId && touchesFixedLines(f, fix))
       : null;
     // A parse failure is reported once, as parses: false, not again as a new syntax-error issue.
-    const newRuleIds = newIssues(before.findings, after.findings).filter((id) => parsed.ok || !isSyntaxError(id));
+    const newRuleIds = newIssues(beforeFindings, after.findings).filter((id) => parsed.ok || !isSyntaxError(id));
 
     const passed = parsed.ok && ruleCleared !== false && newRuleIds.length === 0 && !locality;
     const notes: string[] = [];
@@ -208,5 +217,41 @@ export async function checkFix(
         note: `The fix could not be checked: ${errorText(err)}`,
       },
     };
+  }
+}
+
+// The result for a fix that was never checked, with the reason in the note.
+export function notChecked(note: string): FixCheckResult {
+  return { fixCheck: 'not_checked', detail: { parses: null, ruleCleared: null, newRuleIds: [], note } };
+}
+
+// Checks a review's fixes one after another, in the order given (rule findings first, then the
+// model's), reporting each result as it is known so a run cut off by the time limit keeps the
+// ones it finished. Entries without a fix are skipped (null). At most MAX_FIX_CHECKS fixes are
+// checked; the rest come back not_checked with OVER_FIX_LIMIT_NOTE. The unfixed code is analysed
+// once, only if a fix needs it.
+export async function checkFixes(
+  inputs: FixCheckInput[],
+  code: string,
+  language: Language,
+  onResult: (index: number, result: FixCheckResult | null) => void,
+): Promise<void> {
+  let before: RuleFinding[] | null = null;
+  let checked = 0;
+  for (let i = 0; i < inputs.length; i++) {
+    const input = inputs[i];
+    if (!input.fix) {
+      onResult(i, null);
+    } else if (checked >= MAX_FIX_CHECKS) {
+      onResult(i, notChecked(OVER_FIX_LIMIT_NOTE));
+    } else {
+      checked++;
+      try {
+        before ??= await analyseUnfixed(code, language);
+        onResult(i, await checkFix(input, code, language, undefined, before));
+      } catch (err) {
+        onResult(i, notChecked(`The fix could not be checked: ${errorText(err)}`));
+      }
+    }
   }
 }

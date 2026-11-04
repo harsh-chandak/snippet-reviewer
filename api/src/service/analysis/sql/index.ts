@@ -16,12 +16,53 @@ interface ParsedStatement {
   lineEnd: number;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ast: any | null;
-  error: { line: number; message: string } | null;
+  // description: the finding's text when it is not the usual "does not parse" sentence.
+  error: { line: number; message: string; description?: string } | null;
 }
 
-function parseStatement(code: string, stmt: Statement): ParsedStatement {
+// Deepest parenthesis nesting the parser is given. node-sql-parser backtracks exponentially on
+// unbalanced parentheses: 19 open ones in 35 characters ran the API out of memory (STA-1). So a
+// statement whose parentheses don't balance, or nest deeper than this, is reported as
+// sql/syntax-error without calling the parser.
+export const MAX_PAREN_DEPTH = 8;
+
+// Checks one statement's parentheses on the masked code (strings and comments blanked), skipping
+// quoted identifiers. Returns the problem, or null when they balance within MAX_PAREN_DEPTH.
+function parenProblem(code: string, masked: string, stmt: Statement): ParsedStatement['error'] {
+  const opens: number[] = [];
+  let quote: string | null = null;
+  for (let k = stmt.start; k < stmt.end; k++) {
+    const c = masked[k];
+    if (quote) {
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '"' || c === '`') {
+      quote = c;
+    } else if (c === '(') {
+      opens.push(k);
+      if (opens.length > MAX_PAREN_DEPTH) {
+        const line = lineAt(code, k);
+        return {
+          line,
+          message: `parentheses nested more than ${MAX_PAREN_DEPTH} deep`,
+          description: `This statement nests parentheses more than ${MAX_PAREN_DEPTH} deep on line ${line}, deeper than the SQL checker parses, so it was not parsed.`,
+        };
+      }
+    } else if (c === ')') {
+      if (!opens.length) return { line: lineAt(code, k), message: 'a ")" with no "(" before it' };
+      opens.pop();
+    }
+  }
+  if (opens.length) return { line: lineAt(code, opens[opens.length - 1]), message: 'a "(" that is never closed' };
+  return null;
+}
+
+function parseStatement(code: string, masked: string, stmt: Statement): ParsedStatement {
   const lineStart = lineAt(code, stmt.start);
   const lineEnd = lineAt(code, stmt.end - 1);
+  const parens = parenProblem(code, masked, stmt);
+  if (parens) return { stmt, lineStart, lineEnd, ast: null, error: parens };
   let best: { offset: number; line: number; message: string } | null = null;
   for (const database of DIALECTS) {
     try {
@@ -48,7 +89,7 @@ function statementName(p: ParsedStatement): string {
 
 function parseAll(code: string) {
   const { statements, masked } = splitStatements(code);
-  return { parsed: statements.map((s) => parseStatement(code, s)), masked };
+  return { parsed: statements.map((s) => parseStatement(code, masked, s)), masked };
 }
 
 export const sqlAnalyzer: LanguageAnalyzer = {
@@ -70,7 +111,7 @@ export const sqlAnalyzer: LanguageAnalyzer = {
 
     const failed = parsed.find((p) => p.error);
     if (failed?.error) {
-      const { line, message } = failed.error;
+      const { line, message, description } = failed.error;
       return {
         parseOk: false,
         parseError: `line ${line}: ${message}`,
@@ -83,7 +124,7 @@ export const sqlAnalyzer: LanguageAnalyzer = {
             lineEnd: line,
             severity: 'critical',
             category: 'bug',
-            description: `This statement does not parse as PostgreSQL or MySQL: ${message} on line ${line}.`,
+            description: description ?? `This statement does not parse as PostgreSQL or MySQL: ${message} on line ${line}.`,
             suggestedFix: 'Fix the syntax error; the other SQL checks run once the snippet parses.',
             fix: null,
           },
