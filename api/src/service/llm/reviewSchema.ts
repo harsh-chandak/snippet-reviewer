@@ -33,13 +33,18 @@ export const reviewJsonSchema = {
   required: ['findings'],
 };
 
+// Limits on what we store from the model: a real finding is a few sentences and a short fix.
+export const MAX_FINDINGS = 100;
+export const MAX_DESCRIPTION_CHARS = 2000;
+export const MAX_FIX_CHARS = 4000;
+
 // Checked again on our side: we don't trust the model's output just because we asked for a shape.
 export const findingValidator = Joi.object<LlmFinding>({
   lineStart: Joi.number().integer().min(1).required(),
   lineEnd: Joi.number().integer().min(Joi.ref('lineStart')).required(),
   severity: Joi.string().valid(...SEVERITIES).required(),
   category: Joi.string().valid(...CATEGORIES).required(),
-  description: Joi.string().trim().min(1).required(),
+  description: Joi.string().trim().min(1).max(MAX_DESCRIPTION_CHARS).required(),
   // Optional: a model that writes null or "" means "no fix", which is not a reason to drop the finding.
-  suggestedFix: Joi.string().trim().allow('', null),
+  suggestedFix: Joi.string().trim().max(MAX_FIX_CHARS).allow('', null),
 });

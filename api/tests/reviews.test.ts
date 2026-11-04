@@ -129,6 +129,30 @@ describe('POST /snippets/:id/reviews', () => {
     expect(after.latestReview.findings.map((f: { description: string }) => f.description)).toEqual(['second review']);
   });
 
+  it('keeps at most 100 findings and drops oversized descriptions', async () => {
+    const snippet = await createSnippet({ code: FIVE_LINES });
+    const many = Array.from({ length: 150 }, (_, i) => finding({ description: `finding ${i}` }));
+    many.push(finding({ description: 'x'.repeat(2001) }));
+    fakeProvider.respondWith({ findings: many });
+
+    const review = await waitForReview((await startReview(snippet.id)).id);
+
+    expect(review.findings).toHaveLength(100);
+    expect(review.rejectedCount).toBe(51);
+  });
+
+  it('stores a provider error as short, clean text', async () => {
+    const snippet = await createSnippet();
+    fakeProvider.failWith(`\u001b[31mboom\u001b[0m\n\t${'x'.repeat(5000)}`);
+
+    const review = await waitForReview((await startReview(snippet.id)).id);
+
+    expect(review.status).toBe('failed');
+    expect(review.error.length).toBeLessThanOrEqual(500);
+    expect(review.error.startsWith('boom x')).toBe(true);
+    expect(review.error).not.toMatch(/[\u0000-\u001f]/);
+  });
+
   it('drops findings past the last line and invalid ones, and counts them in rejectedCount', async () => {
     const snippet = await createSnippet({ code: 'a\nb\nc' });
     fakeProvider.respondWith({

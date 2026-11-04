@@ -4,7 +4,7 @@ import { codeLines } from '../utils/codeLines';
 
 // Ids are Postgres integer columns; a bigger number can't be a row, and Postgres would throw on it.
 const MAX_ID = 2147483647;
-// Postgres text can't hold a NUL, and the driver would store it as the two characters \\0.
+// Postgres text can't hold a NUL, and the driver would store it as the two characters \0.
 const NO_NUL = /^[^\u0000]*$/;
 
 export const createSnippetSchema = Joi.object({

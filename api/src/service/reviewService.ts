@@ -6,6 +6,7 @@ import { findingDao } from '../model/dao/FindingDao';
 import { llmService } from './llmService';
 import { LlmError } from './llm/types';
 import { HttpError } from '../utils/httpError';
+import { toUserMessage } from '../utils/userMessage';
 
 // Thrown inside run() when the review is no longer in the state this run expects.
 class SupersededError extends Error {}
@@ -75,7 +76,7 @@ class ReviewService {
       }
       console.error(`[review ${reviewId}] failed`, err, err instanceof LlmError ? err.cause : '');
       // Only our own LlmError messages are safe and useful to show the user.
-      const message = err instanceof LlmError ? err.message : 'The review failed unexpectedly';
+      const message = err instanceof LlmError ? toUserMessage(err.message) : 'The review failed unexpectedly';
       await db
         .transaction(async (transaction) => {
           const failed = await reviewDao.updateIfStatus(

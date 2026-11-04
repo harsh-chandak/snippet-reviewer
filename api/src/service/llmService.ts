@@ -2,7 +2,7 @@ import { anthropicProvider } from './llm/anthropicProvider';
 import { claudeHeadlessProvider } from './llm/claudeHeadlessProvider';
 import { fakeProvider } from './llm/fakeProvider';
 import { buildReviewPrompt, REVIEW_SYSTEM_PROMPT } from './llm/prompt';
-import { findingValidator, LlmFinding, reviewJsonSchema } from './llm/reviewSchema';
+import { findingValidator, LlmFinding, MAX_FINDINGS, reviewJsonSchema } from './llm/reviewSchema';
 import { LlmError, LlmProvider } from './llm/types';
 import { codeLines } from '../utils/codeLines';
 
@@ -56,6 +56,8 @@ class LlmService {
       } else if (value.lineEnd > lineCount) {
         // The model pointed at a line that doesn't exist.
         result.rejected.push({ finding: item, reason: `line ${value.lineEnd} is past the end (${lineCount} lines)` });
+      } else if (result.findings.length >= MAX_FINDINGS) {
+        result.rejected.push({ finding: item, reason: `over the ${MAX_FINDINGS}-finding limit` });
       } else {
         result.findings.push(value);
       }
