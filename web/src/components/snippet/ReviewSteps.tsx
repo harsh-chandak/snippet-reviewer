@@ -110,6 +110,7 @@ function stepDetail(step: ReviewStep, state: StepState, review: Review, staticRu
   if (step === 'static') {
     if (!staticRules) return 'No static rules for this language yet';
     if (state === 'running') return 'Parsing the code and running the rules';
+    if (review.analysisError) return `Static analysis stopped: ${review.analysisError}; the model reviewed the code alone`;
     if (state === 'done') return plural(findings.filter((f) => f.source === 'rule').length, 'rule finding');
     return null;
   }

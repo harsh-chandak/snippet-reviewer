@@ -129,6 +129,9 @@ export interface Review {
   context: CodeContext | null; // the context the review used: the user's, else the detected one
   contextSignals: string[]; // why that context, in plain words ('imports express')
   staticSupported: boolean | null; // false: no static rules for this language; null until the static step ran
+  // Why static analysis stopped (out of time or memory, or the analyzer failed), in plain words; the
+  // review then went on model-only with no rule findings. Null when it finished; absent from older APIs.
+  analysisError?: string | null;
   duplicateCount: number; // model findings dropped because a rule already reported them
   model: string | null;
   inputTokens: number | null;

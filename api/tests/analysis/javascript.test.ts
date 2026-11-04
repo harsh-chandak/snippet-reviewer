@@ -151,14 +151,24 @@ describe('javascriptAnalyzer', () => {
     });
 
     it('runs the rules for the context the user set, and still reports what it detected', async () => {
+      // No signal: only the chosen context's rules run.
+      const code = 'el.innerHTML = html;';
+      const detected = await analyze(code, 'javascript', 'backend');
+      expect(detected.detected.context).toBe('unknown');
+      expect(ids(detected.findings)).toEqual([]);
+      const asFrontend = await analyze(code, 'javascript', 'frontend');
+      expect(asFrontend.detected.context).toBe('unknown');
+      expect(ids(asFrontend.findings)).toEqual(['js/inner-html-assignment']);
+    });
+
+    it('runs the rules of every context with a signal, not only the winning one (rules for detected contexts)', async () => {
+      // express (backend) wins, but JSX is a frontend signal, so the frontend rules run too.
       const code =
         "const express = require('express');\napp.get('/', (req, res) => res.send(<div dangerouslySetInnerHTML={{ __html: req.query.x }} />));";
-      const detected = await analyze(code);
-      expect(detected.detected.context).toBe('backend');
-      expect(ids(detected.findings)).not.toContain('js/dangerously-set-inner-html');
-      const asFrontend = await analyze(code, 'javascript', 'frontend');
-      expect(asFrontend.detected.context).toBe('backend');
-      expect(ids(asFrontend.findings)).toContain('js/dangerously-set-inner-html');
+      const out = await analyze(code);
+      expect(out.detected.context).toBe('backend');
+      expect(ids(out.findings)).toContain('js/dangerously-set-inner-html');
+      expect(ids((await analyze(code, 'javascript', 'frontend')).findings)).toContain('js/dangerously-set-inner-html');
     });
   });
 
@@ -368,19 +378,21 @@ describe('javascriptAnalyzer', () => {
     const frontendOnly = 'el.innerHTML = html;';
     const testOnly = "it.only('x', () => {});";
 
-    it('runs backend rules for backend and script, not for frontend or test', async () => {
+    it('runs backend rules for backend and script, and for any context when the code signals backend', async () => {
       for (const ctx of ['backend', 'script'] as const) {
         expect(ids((await analyze(backendOnly, 'javascript', ctx)).findings)).toContain('js/sql-string-concat');
       }
+      // "runs SQL through .query()" is a backend signal, so a frontend or test choice can't switch the rule off.
       for (const ctx of ['frontend', 'test'] as const) {
-        expect(ids((await analyze(backendOnly, 'javascript', ctx)).findings)).not.toContain('js/sql-string-concat');
+        expect(ids((await analyze(backendOnly, 'javascript', ctx)).findings)).toContain('js/sql-string-concat');
       }
     });
 
-    it('runs frontend rules only for frontend, and test rules only for test', async () => {
+    it('runs frontend rules only for frontend when nothing signals it; test rules whenever the code signals test', async () => {
       expect(ids((await analyze(frontendOnly, 'javascript', 'backend')).findings)).toEqual([]);
       expect(ids((await analyze(frontendOnly, 'javascript', 'frontend')).findings)).toEqual(['js/inner-html-assignment']);
-      expect(ids((await analyze(testOnly, 'javascript', 'backend')).findings)).toEqual([]);
+      // "calls it()" is a test signal.
+      expect(ids((await analyze(testOnly, 'javascript', 'backend')).findings)).toEqual(['js/focused-test']);
       expect(ids((await analyze(testOnly, 'javascript', 'test')).findings)).toEqual(['js/focused-test']);
     });
 

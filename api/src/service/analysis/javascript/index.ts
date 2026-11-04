@@ -1,6 +1,6 @@
 import { CodeContext, Language } from '../../../model/constants';
 import { AnalysisOutput, LanguageAnalyzer } from '../types';
-import { detectContext } from './context';
+import { detectContexts } from './context';
 import { buildOutline } from './outline';
 import { parseSnippet } from './parse';
 import { runRules, syntaxErrorFinding } from './rules';
@@ -13,12 +13,14 @@ export const javascriptAnalyzer: LanguageAnalyzer = {
 
   async analyze(code: string, language: Language, context?: CodeContext): Promise<AnalysisOutput> {
     const parsed = parseSnippet(code, language);
-    const detected = detectContext(parsed);
+    const { detected, signaled } = detectContexts(parsed);
     const outline = buildOutline(parsed);
     if (parsed.error) {
       return { parseOk: false, parseError: parsed.error.text, detected, outline, findings: [syntaxErrorFinding(parsed)] };
     }
-    return { parseOk: true, parseError: null, detected, outline, findings: runRules(parsed, context ?? detected.context) };
+    // The rules of the given (or winning) context and of every other context with a signal.
+    const contexts = [...new Set<CodeContext>([context ?? detected.context, ...signaled])];
+    return { parseOk: true, parseError: null, detected, outline, findings: runRules(parsed, contexts) };
   },
 
   async parses(code: string, language: Language) {

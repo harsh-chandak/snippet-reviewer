@@ -474,14 +474,15 @@ export function rulesFor(context: CodeContext): JsRuleId[] {
   return RULES.filter((r) => context === 'unknown' || r.contexts === 'any' || r.contexts.includes(context)).map((r) => r.id);
 }
 
-export function runRules(parsed: Parsed, context: CodeContext): RuleFinding[] {
+// The rules of every context given (a rule runs if any of them lists it).
+export function runRules(parsed: Parsed, contexts: CodeContext | CodeContext[]): RuleFinding[] {
   const rc: RuleContext = {
     parsed,
     decls: declarations(parsed),
     childProcess: moduleBindings(parsed, CHILD_PROCESS_MODULES),
     fs: moduleBindings(parsed, FS_MODULES),
   };
-  const ids = new Set(rulesFor(context));
+  const ids = new Set((Array.isArray(contexts) ? contexts : [contexts]).flatMap(rulesFor));
   const findings = RULES.filter((r) => ids.has(r.id)).flatMap((r) => r.run(rc));
   return findings.sort((a, b) => a.lineStart - b.lineStart || a.lineEnd - b.lineEnd || a.ruleId.localeCompare(b.ruleId));
 }

@@ -42,6 +42,14 @@ export function looksLikeSql(arg: ts.Expression): boolean {
 }
 
 export function detectContext(parsed: Parsed): DetectedContext {
+  return detectContexts(parsed).detected;
+}
+
+// The winning context (the label and the model's focus) and every context with at least one
+// signal. The rules run for all of those (the decision 'rules for detected contexts'): a Next.js
+// route that imports next/server and runs SQL, or an Express file that calls it.next(), keeps its
+// backend rules although another context won (STA-4, STA-5).
+export function detectContexts(parsed: Parsed): { detected: DetectedContext; signaled: CodeContext[] } {
   const test: string[] = [];
   const signals: Record<Scored, string[]> = { frontend: [], backend: [], script: [] };
   const score: Record<Scored, number> = { frontend: 0, backend: 0, script: 0 };
@@ -108,10 +116,11 @@ export function detectContext(parsed: Parsed): DetectedContext {
     }
   }
 
-  if (test.length > 0) return { context: 'test', signals: test.slice(0, MAX_SIGNALS) };
   const order: Scored[] = ['frontend', 'backend', 'script'];
+  const signaled: CodeContext[] = [...(test.length > 0 ? (['test'] as const) : []), ...order.filter((c) => signals[c].length > 0)];
+  if (test.length > 0) return { detected: { context: 'test', signals: test.slice(0, MAX_SIGNALS) }, signaled };
   let best: Scored | null = null;
   for (const ctx of order) if (score[ctx] > 0 && (best === null || score[ctx] > score[best])) best = ctx;
-  if (best === null) return { context: 'unknown', signals: [] };
-  return { context: best as CodeContext, signals: signals[best].slice(0, MAX_SIGNALS) };
+  if (best === null) return { detected: { context: 'unknown', signals: [] }, signaled };
+  return { detected: { context: best as CodeContext, signals: signals[best].slice(0, MAX_SIGNALS) }, signaled };
 }
