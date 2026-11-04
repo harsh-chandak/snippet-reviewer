@@ -24,7 +24,9 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    // Browser extensions add attributes to <html> before React hydrates; this keeps that from
+    // being reported as a mismatch (it applies to this element only, not to its children).
+    <html lang="en" suppressHydrationWarning>
       <body className={`${geistSans.variable} ${geistMono.variable} min-h-screen antialiased`}>
         <header className="border-b border-[var(--border)] bg-[var(--surface)]">
           <div className="mx-auto flex h-14 max-w-5xl items-center justify-between px-4 sm:px-6">

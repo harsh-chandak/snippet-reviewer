@@ -3,17 +3,10 @@
 import { useEffect, useState } from 'react';
 import { ErrorBanner, SEVERITY_LABELS } from '@/components/shared';
 import { FINDING_STATUSES, SEVERITIES } from '@/lib/types';
-import type { FindingStatus, Review, Severity } from '@/lib/types';
+import type { CodeContext, FindingStatus, Language, Review, ReviewPhase, Severity } from '@/lib/types';
+import { ReviewSteps } from './ReviewSteps';
+import { Spinner } from './Spinner';
 import { isActive } from './useSnippetReview';
-
-export function Spinner({ className = 'h-4 w-4' }: { className?: string }) {
-  return (
-    <svg aria-hidden viewBox="0 0 24 24" fill="none" className={`animate-spin ${className}`}>
-      <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" className="opacity-25" />
-      <path d="M22 12a10 10 0 0 0-10-10" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
-    </svg>
-  );
-}
 
 // Whole seconds since `from`, ticking once a second.
 function useElapsedSeconds(from: string): number {
@@ -30,8 +23,19 @@ function formatElapsed(seconds: number): string {
   return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s`;
 }
 
+const PHASE_TEXT: Partial<Record<ReviewPhase, string>> = {
+  static: 'Running static analysis…',
+  model: 'Asking the model…',
+  checking: 'Checking proposed fixes…',
+};
+
 function ReviewProgress({ review }: { review: Review }) {
   const seconds = useElapsedSeconds(review.createdAt);
+  const ruleFindings = (review.findings ?? []).filter((f) => f.source === 'rule').length;
+  const hint =
+    review.phase === 'model' && ruleFindings > 0
+      ? 'Rule findings are on their lines below; AI findings follow when the model answers.'
+      : 'Findings appear on their lines as each step finishes.';
   return (
     <div
       role="status"
@@ -39,13 +43,13 @@ function ReviewProgress({ review }: { review: Review }) {
     >
       <Spinner />
       <span className="font-medium">
-        {review.status === 'pending' ? 'Starting review…' : 'Reviewing…'}
+        {review.status === 'pending' ? 'Starting review…' : (PHASE_TEXT[review.phase] ?? 'Reviewing…')}
       </span>
       {/* Not announced every second; the status line above is. */}
       <span aria-hidden className="tabular-nums">
         {formatElapsed(seconds)}
       </span>
-      <span className="ml-auto hidden text-xs opacity-80 sm:inline">Findings appear on their lines when it finishes.</span>
+      <span className="ml-auto hidden text-xs opacity-80 sm:inline">{hint}</span>
     </div>
   );
 }
@@ -73,8 +77,20 @@ function RejectedNote({ count }: { count: number }) {
   );
 }
 
+function DuplicateNote({ count }: { count: number }) {
+  if (count <= 0) return null;
+  return (
+    <p className="text-xs text-[var(--muted)]">
+      {plural(count, 'AI suggestion', 'AI suggestions')} repeated a rule finding on the same line and{' '}
+      {count === 1 ? 'was' : 'were'} left out.
+    </p>
+  );
+}
+
 function Summary({ review }: { review: Review }) {
   const findings = review.findings ?? [];
+  const modelFindings = findings.filter((f) => f.source === 'model').length;
+  const ruleFindings = findings.length - modelFindings;
   // Nothing usable came back, but the model did say something: never call that "no issues".
   if (findings.length === 0 && review.rejectedCount > 0) {
     return (
@@ -109,8 +125,19 @@ function Summary({ review }: { review: Review }) {
 
   return (
     <div className="space-y-1 rounded-md border border-[var(--border)] bg-[var(--surface)] px-4 py-3">
+      {modelFindings === 0 && review.rejectedCount > 0 && (
+        <p className="pb-1 text-sm font-semibold text-amber-900 dark:text-amber-200">
+          The model&apos;s part of this review couldn&apos;t be used: it returned{' '}
+          {plural(review.rejectedCount, 'suggestion')} and none passed our checks. The rule findings stand; run the
+          review again for the AI findings.
+        </p>
+      )}
       <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
         <span className="font-semibold">{plural(findings.length, 'finding')}</span>
+        <span className="text-[var(--muted)]">
+          <span className="tabular-nums text-[var(--foreground)]">{ruleFindings}</span> rule &middot;{' '}
+          <span className="tabular-nums text-[var(--foreground)]">{modelFindings}</span> AI
+        </span>
         <ul className="flex flex-wrap items-center gap-x-4 gap-y-1" aria-label="By severity">
           {SEVERITIES.map((s) => (
             <li key={s} className={`flex items-center gap-1.5 ${bySeverity[s] ? '' : 'text-[var(--muted)]'}`}>
@@ -134,7 +161,21 @@ function Summary({ review }: { review: Review }) {
         </ul>
       </div>
       <RejectedNote count={review.rejectedCount} />
+      <DuplicateNote count={review.duplicateCount} />
     </div>
+  );
+}
+
+// A failed review keeps the rule findings the static step saved; say so, so they are not
+// mistaken for a finished review.
+function KeptFindingsNote({ review }: { review: Review }) {
+  const kept = (review.findings ?? []).filter((f) => f.source === 'rule').length;
+  if (kept === 0) return null;
+  return (
+    <p className="text-xs text-[var(--muted)]">
+      Static analysis had already finished, so its {plural(kept, 'rule finding')} {kept === 1 ? 'is' : 'are'} kept and
+      shown on {kept === 1 ? 'its line' : 'their lines'} below.
+    </p>
   );
 }
 
@@ -142,12 +183,16 @@ function Summary({ review }: { review: Review }) {
 // the error when it failed, and the summary of findings when it is done.
 export function ReviewPanel({
   review,
+  language,
+  snippetContext,
   startError,
   pollError,
   starting,
   onRetry,
 }: {
   review: Review | null;
+  language: Language;
+  snippetContext: CodeContext | null;
   startError: string | null;
   pollError: string | null;
   starting: boolean;
@@ -173,7 +218,9 @@ export function ReviewPanel({
           onRetry={onRetry}
         />
       )}
+      {review?.status === 'failed' && !starting && <KeptFindingsNote review={review} />}
       {review?.status === 'done' && <Summary review={review} />}
+      {review && <ReviewSteps review={review} language={language} snippetContext={snippetContext} />}
     </div>
   );
 }

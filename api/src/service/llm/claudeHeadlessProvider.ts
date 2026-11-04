@@ -1,6 +1,6 @@
 import { spawn } from 'child_process';
 import os from 'os';
-import { LlmError, LlmProvider } from './types';
+import { GenerateInput, GenerateResult, LlmError, LlmProvider, LlmUsage, tokenCount } from './types';
 
 const MAX_OUTPUT_BYTES = 5 * 1024 * 1024;
 const MAX_STDERR_CHARS = 8000;
@@ -21,7 +21,7 @@ class ClaudeHeadlessProvider implements LlmProvider {
     return Number(process.env.LLM_TIMEOUT_MS) || 120000;
   }
 
-  generateStructured(input: { system: string; prompt: string; jsonSchema: object }): Promise<unknown> {
+  generateStructured(input: GenerateInput): Promise<GenerateResult> {
     const args = [
       '-p',
       '--system-prompt', input.system,
@@ -91,7 +91,7 @@ class ClaudeHeadlessProvider implements LlmProvider {
           if (result.structured_output === undefined) {
             return reject(new LlmError('The model did not return structured output', result));
           }
-          resolve(result.structured_output);
+          resolve({ output: result.structured_output, usage: this.usageFrom(result) });
         } catch (err) {
           reject(new LlmError('Could not read the Claude Code CLI output', err));
         }
@@ -99,6 +99,39 @@ class ClaudeHeadlessProvider implements LlmProvider {
 
       child.stdin.end(input.prompt);
     });
+  }
+
+  // Tokens come from the CLI's `usage`, the price from its own `total_cost_usd` estimate.
+  // The model is the one modelUsage charged most for (the CLI resolves an alias like 'sonnet'
+  // to a full id there); without modelUsage, the model we asked for.
+  private usageFrom(result: any): LlmUsage | null {
+    const usage = result?.usage;
+    const cost = result?.total_cost_usd;
+    const hasCost = typeof cost === 'number' && Number.isFinite(cost) && cost >= 0;
+    if ((typeof usage !== 'object' || usage === null) && !hasCost) return null;
+
+    let model = this.model;
+    const byModel = result?.modelUsage;
+    if (typeof byModel === 'object' && byModel !== null) {
+      let best = -1;
+      for (const [id, m] of Object.entries<any>(byModel)) {
+        const weight = Number(m?.costUSD) || 0;
+        if (weight > best) {
+          best = weight;
+          model = id;
+        }
+      }
+    }
+
+    return {
+      model: model.slice(0, 80),
+      inputTokens: tokenCount(usage?.input_tokens),
+      outputTokens: tokenCount(usage?.output_tokens),
+      cacheReadTokens: tokenCount(usage?.cache_read_input_tokens),
+      cacheWriteTokens: tokenCount(usage?.cache_creation_input_tokens),
+      costUsd: hasCost ? cost : null,
+      costSource: hasCost ? 'cli' : null,
+    };
   }
 }
 

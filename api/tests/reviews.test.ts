@@ -29,7 +29,13 @@ describe('POST /snippets/:id/reviews', () => {
 
     expect(res.status).toBe(202);
     expect(res.body).toMatchObject({ success: true, message: 'Review started' });
-    expect(res.body.data).toMatchObject({ id: expect.any(Number), snippetId: snippet.id, status: 'pending', provider: 'fake' });
+    expect(res.body.data).toMatchObject({
+      id: expect.any(Number),
+      snippetId: snippet.id,
+      status: 'pending',
+      phase: 'queued',
+      provider: 'fake',
+    });
 
     const during = await getSnippet(snippet.id);
     expect(during.reviewStatus).toBe('in_progress');
@@ -55,7 +61,9 @@ describe('POST /snippets/:id/reviews', () => {
     const started = await startReview(snippet.id);
     const review = await waitForReview(started.id);
 
-    expect(review).toMatchObject({ id: started.id, status: 'done', error: null, rejectedCount: 0 });
+    // FIVE_LINES triggers no static rule, so every finding here is the model's.
+    expect(review).toMatchObject({ id: started.id, status: 'done', phase: 'done', error: null, rejectedCount: 0, duplicateCount: 0 });
+    for (const f of review.findings) expect(f).toMatchObject({ source: 'model', ruleId: null, fixCheck: 'not_checked' });
     expect(review.completedAt).not.toBeNull();
     expect(review.findings.map((f: any) => [f.lineStart, f.lineEnd])).toEqual([
       [1, 1],
@@ -205,7 +213,7 @@ describe('POST /snippets/:id/reviews', () => {
 
     const review = await waitForReview((await startReview(snippet.id)).id);
 
-    expect(review).toMatchObject({ status: 'failed', error: 'The review timed out after 120s', findings: [] });
+    expect(review).toMatchObject({ status: 'failed', phase: 'failed', error: 'The review timed out after 120s', findings: [] });
     expect(review.completedAt).not.toBeNull();
     const after = await getSnippet(snippet.id);
     expect(after.reviewStatus).toBe('failed');

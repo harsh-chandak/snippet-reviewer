@@ -4,14 +4,33 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useId, useRef, useState, type FormEvent } from 'react';
 import { ApiError, createSnippet, errorMessage, startReview } from '@/lib/api';
-import { LANGUAGES, MAX_CODE_CHARS, MAX_CODE_LINES, type FieldErrors, type Language } from '@/lib/types';
-import { ErrorBanner, LANGUAGE_LABELS } from '@/components/shared';
+import {
+  LANGUAGES,
+  MAX_CODE_CHARS,
+  MAX_CODE_LINES,
+  type CodeContext,
+  type ContextChoice,
+  type FieldErrors,
+  type Language,
+} from '@/lib/types';
+import { CONTEXT_LABELS, ErrorBanner, LANGUAGE_LABELS } from '@/components/shared';
 import { CodeCounter, countCode } from './CodeCounter';
 import { CodeEditor } from './CodeEditor';
 import { FieldError } from './FieldError';
 
 const MAX_TITLE_CHARS = 200;
-const FIELDS = ['title', 'language', 'code'] as const;
+const FIELDS = ['title', 'language', 'context', 'code'] as const;
+
+// The kinds of code a user can pick. 'unknown' is what detection says when nothing fired,
+// not something to choose, so it is not offered; Auto-detect sends 'auto'.
+const CONTEXT_CHOICES: Exclude<CodeContext, 'unknown'>[] = ['frontend', 'backend', 'script', 'test', 'query'];
+const CONTEXT_HINTS: Record<(typeof CONTEXT_CHOICES)[number], string> = {
+  frontend: 'browser or UI code',
+  backend: 'server, API or database code',
+  script: 'a one-off or command-line script',
+  test: 'a test file',
+  query: 'SQL',
+};
 type Field = (typeof FIELDS)[number];
 
 // Quick checks for instant feedback. The API runs the same rules and has the last word.
@@ -50,6 +69,8 @@ export function SnippetForm() {
   const ids = {
     title: `${id}-title`,
     language: `${id}-language`,
+    context: `${id}-context`,
+    contextHelp: `${id}-context-help`,
     code: `${id}-code`,
     codeHelp: `${id}-code-help`,
     codeCount: `${id}-code-count`,
@@ -60,6 +81,7 @@ export function SnippetForm() {
   const [title, setTitle] = useState('');
   const [language, setLanguage] = useState<Language | ''>('');
   const [code, setCode] = useState('');
+  const [context, setContext] = useState<ContextChoice>('auto');
   const [reviewNow, setReviewNow] = useState(true);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
@@ -68,8 +90,9 @@ export function SnippetForm() {
 
   const titleRef = useRef<HTMLInputElement>(null);
   const languageRef = useRef<HTMLSelectElement>(null);
+  const contextRef = useRef<HTMLSelectElement>(null);
   const codeRef = useRef<HTMLTextAreaElement>(null);
-  const refs = { title: titleRef, language: languageRef, code: codeRef };
+  const refs = { title: titleRef, language: languageRef, context: contextRef, code: codeRef };
 
   function clearError(field: Field) {
     setFieldErrors((prev) => {
@@ -101,7 +124,7 @@ export function SnippetForm() {
     inFlight.current = true;
     setSubmitting(true);
     try {
-      const snippet = await createSnippet({ title, language: language as Language, code });
+      const snippet = await createSnippet({ title, language: language as Language, code, context });
       if (reviewNow) {
         // If this fails the snippet still exists; its page shows the review state and a retry.
         await startReview(snippet.id).catch(() => undefined);
@@ -181,6 +204,37 @@ export function SnippetForm() {
           ))}
         </select>
         <FieldError id={errorId('language')} messages={fieldErrors.language} />
+      </div>
+
+      <div>
+        <label htmlFor={ids.context} className="mb-1.5 block text-sm font-medium">
+          Kind of code
+        </label>
+        <select
+          ref={contextRef}
+          id={ids.context}
+          name="context"
+          value={context}
+          onChange={(e) => {
+            setContext(e.target.value as ContextChoice);
+            clearError('context');
+          }}
+          aria-invalid={fieldErrors.context ? true : undefined}
+          aria-describedby={describe(ids.contextHelp, fieldErrors.context && errorId('context'))}
+          className={`${inputClass} sm:w-64 ${fieldErrors.context ? 'border-red-500' : 'border-[var(--border)]'}`}
+        >
+          <option value="auto">Auto-detect</option>
+          {CONTEXT_CHOICES.map((c) => (
+            <option key={c} value={c}>
+              {CONTEXT_LABELS[c]} ({CONTEXT_HINTS[c]})
+            </option>
+          ))}
+        </select>
+        <p id={ids.contextHelp} className="mt-1.5 text-xs text-[var(--muted)]">
+          Picks which rules run and what the model focuses on. Auto-detect reads it from imports and calls, and the
+          review shows why it chose.
+        </p>
+        <FieldError id={errorId('context')} messages={fieldErrors.context} />
       </div>
 
       <div>

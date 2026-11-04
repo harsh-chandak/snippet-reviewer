@@ -1,8 +1,9 @@
 'use client';
 
 import { useId, useState } from 'react';
-import { CategoryTag, SeverityBadge } from '@/components/shared';
+import { CategoryTag, FixCheckBadge, SeverityBadge, SourceBadge } from '@/components/shared';
 import type { Finding, FindingStatus, Severity } from '@/lib/types';
+import { FixDiff } from './FixDiff';
 
 export function lineLabel(f: Pick<Finding, 'lineStart' | 'lineEnd'>): string {
   return f.lineStart === f.lineEnd ? `Line ${f.lineStart}` : `Lines ${f.lineStart}–${f.lineEnd}`;
@@ -36,7 +37,31 @@ function XIcon() {
   );
 }
 
-function Body({ finding }: { finding: Finding }) {
+// The proposed fix as a before/after, with whether it passed the mechanical check and why.
+function ProposedFix({
+  finding,
+  lines,
+  checking,
+}: {
+  finding: Finding;
+  lines: readonly string[];
+  checking: boolean;
+}) {
+  if (!finding.fix) return null;
+  const note = finding.fixCheckDetail?.note;
+  return (
+    <div className="mt-3">
+      <div className="mb-1 flex flex-wrap items-center gap-2">
+        <p className="text-xs font-semibold text-[var(--muted)]">Proposed change</p>
+        <FixCheckBadge fixCheck={finding.fixCheck} detail={finding.fixCheckDetail} checking={checking} />
+      </div>
+      <FixDiff fix={finding.fix} lines={lines} />
+      {note && <p className="mt-1 break-words text-xs text-[var(--muted)]">{note}</p>}
+    </div>
+  );
+}
+
+function Body({ finding, lines, checking }: { finding: Finding; lines: readonly string[]; checking: boolean }) {
   return (
     <>
       <p className="whitespace-pre-wrap break-words text-sm leading-6">{finding.description}</p>
@@ -48,6 +73,19 @@ function Body({ finding }: { finding: Finding }) {
           </pre>
         </div>
       )}
+      <ProposedFix finding={finding} lines={lines} checking={checking} />
+    </>
+  );
+}
+
+// Rule or AI, and for a rule its id, so the same rule is recognisable across reviews.
+function Source({ finding }: { finding: Finding }) {
+  return (
+    <>
+      <SourceBadge source={finding.source} ruleId={finding.ruleId} />
+      {finding.source === 'rule' && finding.ruleId && (
+        <code className="hidden truncate text-[11px] text-[var(--muted)] sm:inline">{finding.ruleId}</code>
+      )}
     </>
   );
 }
@@ -56,11 +94,15 @@ function Body({ finding }: { finding: Finding }) {
 // with Accept and Dismiss; accepted or dismissed ones fold to a single line with Reopen.
 export function FindingCard({
   finding,
+  lines,
+  checking = false,
   pending,
   error,
   onSetStatus,
 }: {
   finding: Finding;
+  lines: readonly string[]; // codeLines(code), for the fix's before side
+  checking?: boolean; // the review is still running, so an unchecked fix may yet be checked
   pending: boolean;
   error?: string;
   onSetStatus: (status: FindingStatus) => void;
@@ -92,6 +134,7 @@ export function FindingCard({
             {accepted ? <CheckIcon /> : <XIcon />}
             {accepted ? 'Accepted' : 'Dismissed'}
           </span>
+          <SourceBadge source={finding.source} ruleId={finding.ruleId} />
           <SeverityBadge severity={finding.severity} />
           <span className="hidden sm:inline-flex">
             <CategoryTag category={finding.category} />
@@ -119,7 +162,7 @@ export function FindingCard({
         </div>
         {expanded && (
           <div id={detailsId} className="mt-2 border-t border-[var(--border)] pt-2">
-            <Body finding={finding} />
+            <Body finding={finding} lines={lines} checking={checking} />
           </div>
         )}
         {errorText}
@@ -129,16 +172,17 @@ export function FindingCard({
 
   return (
     <article
-      aria-label={`${finding.severity} ${finding.category} finding, ${where}`}
+      aria-label={`${finding.source === 'rule' ? 'Rule' : 'AI'} ${finding.severity} ${finding.category} finding, ${where}`}
       className={`rounded-md border border-l-4 border-[var(--border)] ${ACCENT[finding.severity]} bg-[var(--background)] shadow-sm`}
     >
       <header className="flex flex-wrap items-center gap-2 border-b border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-xs">
+        <Source finding={finding} />
         <SeverityBadge severity={finding.severity} />
         <CategoryTag category={finding.category} />
         <span className="font-medium text-[var(--muted)]">{where}</span>
       </header>
       <div className="px-3 py-3">
-        <Body finding={finding} />
+        <Body finding={finding} lines={lines} checking={checking} />
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <button type="button" className={ACCEPT_BUTTON} disabled={pending} onClick={() => onSetStatus('accepted')}>
             <CheckIcon />

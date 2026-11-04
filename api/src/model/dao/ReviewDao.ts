@@ -1,11 +1,25 @@
 import { Transaction } from 'sequelize';
 import { Finding, Review } from '../schema';
-import { ACTIVE_REVIEW_STATUSES, ReviewStatus } from '../constants';
+import { ACTIVE_REVIEW_STATUSES, CodeContext, ReviewPhase, ReviewStatus } from '../constants';
+import type { CostSource, PhaseTimings } from '../schema/Review';
 
-type ReviewUpdate = Partial<{
+export type ReviewUpdate = Partial<{
   status: ReviewStatus;
+  phase: ReviewPhase;
+  phaseTimings: PhaseTimings;
   error: string | null;
   rejectedCount: number;
+  duplicateCount: number;
+  context: CodeContext;
+  contextSignals: string[];
+  staticSupported: boolean;
+  model: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheReadTokens: number | null;
+  cacheWriteTokens: number | null;
+  costUsd: number | null;
+  costSource: CostSource | null;
   startedAt: Date;
   completedAt: Date;
 }>;
@@ -16,8 +30,15 @@ const withFindings = {
 };
 
 class ReviewDao {
-  async create(data: { snippetId: number; provider: string }, transaction?: Transaction) {
+  async create(
+    data: { snippetId: number; provider: string; promptVersion: string; rulesetVersion: string },
+    transaction?: Transaction,
+  ) {
     return Review.create(data, { transaction });
+  }
+
+  async findById(id: number) {
+    return Review.findByPk(id);
   }
 
   async findByIdWithFindings(id: number) {

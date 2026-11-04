@@ -1,9 +1,9 @@
 import { execFileSync } from 'child_process';
 import path from 'path';
 import { Sequelize } from 'sequelize';
-import { TEST_DATABASE_URL } from '../vitest.config';
+import { TEST_DATABASE_NAME, TEST_DATABASE_URL } from '../vitest.config';
 
-const TEST_DB = 'snippets_test';
+const TEST_DB = TEST_DATABASE_NAME;
 const apiDir = path.resolve(__dirname, '..');
 
 // Runs once per `vitest run`, before any test file: drops and recreates snippets_test,

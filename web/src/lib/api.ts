@@ -7,6 +7,8 @@ import type {
   Language,
   ListSnippetsParams,
   Review,
+  ReviewEvent,
+  ReviewEventList,
   SnippetDetail,
   SnippetPage,
 } from './types';
@@ -107,6 +109,13 @@ export function startReview(snippetId: number): Promise<Review> {
 // GET /reviews/:id — the review with its findings. Poll while status is pending or running.
 export function getReview(id: number): Promise<Review> {
   return api<Review>(`/reviews/${id}`);
+}
+
+// GET /reviews/:id/events — what each step of the review did, ordered by id.
+// 404 (ApiError.isNotFound) means the review does not exist.
+export async function listReviewEvents(reviewId: number): Promise<ReviewEvent[]> {
+  const data = await api<ReviewEventList>(`/reviews/${reviewId}/events`);
+  return data.items;
 }
 
 // PATCH /findings/:id — accept, dismiss or reopen a finding.

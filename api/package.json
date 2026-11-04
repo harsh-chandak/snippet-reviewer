@@ -18,10 +18,14 @@
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "joi": "^17.13.3",
+    "node-sql-parser": "5.4.0",
     "pg": "^8.13.1",
     "pg-hstore": "^2.3.4",
     "sequelize": "^6.37.5",
-    "umzug": "^3.8.2"
+    "tree-sitter-python": "0.25.0",
+    "typescript": "^5.7.2",
+    "umzug": "^3.8.2",
+    "web-tree-sitter": "0.25.10"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
@@ -32,7 +36,6 @@
     "rimraf": "^6.0.1",
     "supertest": "7.1.4",
     "ts-node": "^10.9.2",
-    "typescript": "^5.7.2",
     "vitest": "3.2.4"
   }
 }

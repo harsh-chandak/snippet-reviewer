@@ -32,6 +32,7 @@ describe('claude-headless provider limits', () => {
 
   it('still returns the structured output of a normal answer', async () => {
     process.env.CLAUDE_BIN = stub('ok.sh', `echo '{"subtype":"success","is_error":false,"structured_output":{"findings":[]}}'`);
-    await expect(claudeHeadlessProvider.generateStructured(input)).resolves.toEqual({ findings: [] });
+    // Providers resolve { output, usage }; this answer reports no usage and no cost, so usage is null.
+    await expect(claudeHeadlessProvider.generateStructured(input)).resolves.toEqual({ output: { findings: [] }, usage: null });
   });
 });

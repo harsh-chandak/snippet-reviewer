@@ -13,6 +13,12 @@ class ReviewController {
     const review = await reviewService.get(Number(req.params.id));
     return successResponseHandler(res, { message: 'Review', data: review });
   }
+
+  // The review's event log, oldest first: { items: ReviewEvent[] }.
+  async events(req: Request, res: Response) {
+    const events = await reviewService.events(Number(req.params.id));
+    return successResponseHandler(res, { message: 'Review events', data: events });
+  }
 }
 
 export const reviewController = new ReviewController();

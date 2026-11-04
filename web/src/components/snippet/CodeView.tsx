@@ -16,6 +16,7 @@ export function CodeView({
   code,
   language,
   findings,
+  reviewActive = false,
   pendingFindings,
   findingErrors,
   onSetFindingStatus,
@@ -23,6 +24,7 @@ export function CodeView({
   code: string;
   language: Language;
   findings: Finding[];
+  reviewActive?: boolean; // findings may still be arriving and fixes may not be checked yet
   pendingFindings: ReadonlySet<number>;
   findingErrors: Readonly<Record<number, string>>;
   onSetFindingStatus: (findingId: number, status: FindingStatus) => void;
@@ -129,6 +131,8 @@ export function CodeView({
                       <FindingCard
                         key={f.id}
                         finding={f}
+                        lines={lines}
+                        checking={reviewActive}
                         pending={pendingFindings.has(f.id)}
                         error={findingErrors[f.id]}
                         onSetStatus={(status) => onSetFindingStatus(f.id, status)}

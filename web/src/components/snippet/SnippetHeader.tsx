@@ -2,7 +2,7 @@
 
 import { LanguageTag, ReviewStatusBadge } from '@/components/shared';
 import type { Review, SnippetDetail, SnippetReviewStatus } from '@/lib/types';
-import { Spinner } from './ReviewPanel';
+import { Spinner } from './Spinner';
 
 function formatDate(iso: string): string {
   const d = new Date(iso);

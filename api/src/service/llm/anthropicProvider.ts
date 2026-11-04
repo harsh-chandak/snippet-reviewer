@@ -1,4 +1,4 @@
-import { LlmError, LlmProvider } from './types';
+import { GenerateInput, GenerateResult, LlmError, LlmProvider, LlmUsage, tokenCount } from './types';
 
 const API_URL = 'https://api.anthropic.com/v1/messages';
 const API_VERSION = '2023-06-01';
@@ -13,7 +13,7 @@ class AnthropicProvider implements LlmProvider {
   private timeoutMs = Number(process.env.LLM_TIMEOUT_MS) || 120000;
   private maxTokens = 8192;
 
-  async generateStructured(input: { system: string; prompt: string; jsonSchema: object }): Promise<unknown> {
+  async generateStructured(input: GenerateInput): Promise<GenerateResult> {
     // Read at call time, so the app still starts (and tests still run) without a key.
     const apiKey = process.env.ANTHROPIC_API_KEY || process.env.LLM_API_KEY;
     if (!apiKey) {
@@ -80,8 +80,50 @@ class AnthropicProvider implements LlmProvider {
     if (!block) {
       throw new LlmError('The model did not return structured output', body);
     }
-    return block.input;
+    return { output: block.input, usage: usageFrom(body, this.model) };
   }
+}
+
+const PRICE_SETTINGS = [
+  'LLM_PRICE_INPUT_PER_MTOK',
+  'LLM_PRICE_OUTPUT_PER_MTOK',
+  'LLM_PRICE_CACHE_READ_PER_MTOK',
+  'LLM_PRICE_CACHE_WRITE_PER_MTOK',
+] as const;
+
+// USD per million tokens, from the environment. No price is ever written into the code: unless
+// all four settings are present and valid numbers, the call is not priced at all.
+function priceConfig(): number[] | null {
+  const prices = PRICE_SETTINGS.map((name) => {
+    const raw = process.env[name]?.trim();
+    const value = raw ? Number(raw) : NaN;
+    return Number.isFinite(value) && value >= 0 ? value : null;
+  });
+  return prices.every((p) => p !== null) ? (prices as number[]) : null;
+}
+
+// Tokens from the Messages API response's `usage`; the model is the one the API says answered.
+export function usageFrom(body: any, requestedModel: string): LlmUsage | null {
+  const usage = body?.usage;
+  if (typeof usage !== 'object' || usage === null) return null;
+
+  const tokens = {
+    inputTokens: tokenCount(usage.input_tokens),
+    outputTokens: tokenCount(usage.output_tokens),
+    cacheReadTokens: tokenCount(usage.cache_read_input_tokens),
+    cacheWriteTokens: tokenCount(usage.cache_creation_input_tokens),
+  };
+  const prices = priceConfig();
+  const costUsd = prices
+    ? (tokens.inputTokens * prices[0] +
+        tokens.outputTokens * prices[1] +
+        tokens.cacheReadTokens * prices[2] +
+        tokens.cacheWriteTokens * prices[3]) /
+      1_000_000
+    : null;
+  const model = typeof body?.model === 'string' && body.model ? body.model : requestedModel;
+
+  return { model: model.slice(0, 80), ...tokens, costUsd, costSource: prices ? 'price-config' : null };
 }
 
 export const anthropicProvider = new AnthropicProvider();
