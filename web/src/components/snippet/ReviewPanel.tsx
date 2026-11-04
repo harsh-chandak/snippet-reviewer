@@ -1,58 +1,11 @@
 'use client';
 
-import { useEffect, useState } from 'react';
 import { ErrorBanner, SEVERITY_LABELS } from '@/components/shared';
 import { FINDING_STATUSES, SEVERITIES } from '@/lib/types';
-import type { CodeContext, FindingStatus, Language, Review, ReviewPhase, Severity } from '@/lib/types';
+import type { CodeContext, FindingStatus, Language, Review, Severity } from '@/lib/types';
+import { formatDuration } from './format';
 import { ReviewSteps } from './ReviewSteps';
-import { Spinner } from './Spinner';
 import { isActive } from './useSnippetReview';
-
-// Whole seconds since `from`, ticking once a second.
-function useElapsedSeconds(from: string): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, []);
-  return Math.max(0, Math.floor((now - new Date(from).getTime()) / 1000));
-}
-
-function formatElapsed(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`;
-  return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s`;
-}
-
-const PHASE_TEXT: Partial<Record<ReviewPhase, string>> = {
-  static: 'Running static analysis…',
-  model: 'Asking the model…',
-  checking: 'Checking proposed fixes…',
-};
-
-function ReviewProgress({ review }: { review: Review }) {
-  const seconds = useElapsedSeconds(review.createdAt);
-  const ruleFindings = (review.findings ?? []).filter((f) => f.source === 'rule').length;
-  const hint =
-    review.phase === 'model' && ruleFindings > 0
-      ? 'Rule findings are on their lines below; AI findings follow when the model answers.'
-      : 'Findings appear on their lines as each step finishes.';
-  return (
-    <div
-      role="status"
-      className="flex items-center gap-3 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200"
-    >
-      <Spinner />
-      <span className="font-medium">
-        {review.status === 'pending' ? 'Starting review…' : (PHASE_TEXT[review.phase] ?? 'Reviewing…')}
-      </span>
-      {/* Not announced every second; the status line above is. */}
-      <span aria-hidden className="tabular-nums">
-        {formatElapsed(seconds)}
-      </span>
-      <span className="ml-auto hidden text-xs opacity-80 sm:inline">{hint}</span>
-    </div>
-  );
-}
 
 const SEVERITY_DOT: Record<Severity, string> = {
   critical: 'bg-red-500',
@@ -60,7 +13,7 @@ const SEVERITY_DOT: Record<Severity, string> = {
   info: 'bg-blue-500',
 };
 
-const STATUS_LABEL: Record<FindingStatus, string> = { open: 'open', accepted: 'accepted', dismissed: 'dismissed' };
+const STATUS_LABEL: Record<FindingStatus, string> = { open: 'open', accepted: 'marked valid', dismissed: 'not an issue' };
 
 function plural(n: number, one: string, many = `${one}s`) {
   return `${n} ${n === 1 ? one : many}`;
@@ -91,6 +44,9 @@ function Summary({ review }: { review: Review }) {
   const findings = review.findings ?? [];
   const modelFindings = findings.filter((f) => f.source === 'model').length;
   const ruleFindings = findings.length - modelFindings;
+  const started = review.startedAt ? Date.parse(review.startedAt) : NaN;
+  const completed = review.completedAt ? Date.parse(review.completedAt) : NaN;
+  const tookMs = Number.isFinite(started) && Number.isFinite(completed) && completed >= started ? completed - started : null;
   // Nothing usable came back, but the model did say something: never call that "no issues".
   if (findings.length === 0 && review.rejectedCount > 0) {
     return (
@@ -133,7 +89,10 @@ function Summary({ review }: { review: Review }) {
         </p>
       )}
       <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
-        <span className="font-semibold">{plural(findings.length, 'finding')}</span>
+        <span className="font-semibold">
+          {plural(findings.length, 'finding')}
+          {tookMs !== null && <span className="font-normal text-[var(--muted)]"> in {formatDuration(tookMs)}</span>}
+        </span>
         <span className="text-[var(--muted)]">
           <span className="tabular-nums text-[var(--foreground)]">{ruleFindings}</span> rule &middot;{' '}
           <span className="tabular-nums text-[var(--foreground)]">{modelFindings}</span> AI
@@ -174,13 +133,14 @@ function KeptFindingsNote({ review }: { review: Review }) {
   return (
     <p className="text-xs text-[var(--muted)]">
       Static analysis had already finished, so its {plural(kept, 'rule finding')} {kept === 1 ? 'is' : 'are'} kept and
-      shown on {kept === 1 ? 'its line' : 'their lines'} below.
+      listed beside the code.
     </p>
   );
 }
 
-// What sits above the code: nothing before the first review, progress while one runs,
-// the error when it failed, and the summary of findings when it is done.
+// What sits above the code and the findings: a note before the first review, the error when
+// it failed, the summary of findings when it is done, and the step list (which is also the
+// progress while a review runs).
 export function ReviewPanel({
   review,
   language,
@@ -203,11 +163,11 @@ export function ReviewPanel({
       {startError && <ErrorBanner title="Could not start the review" message={startError} onRetry={onRetry} />}
       {!review && !startError && (
         <p className="rounded-md border border-dashed border-[var(--border)] px-4 py-3 text-sm text-[var(--muted)]">
-          This snippet hasn&apos;t been reviewed yet. Run a review and each finding will appear under the line it is
-          about.
+          This snippet hasn&apos;t been reviewed yet. Run a review and its findings will be listed beside the code, most
+          severe first; select one to see the lines it is about.
         </p>
       )}
-      {review && isActive(review.status) && <ReviewProgress key={review.id} review={review} />}
+      {/* While a review runs, the step list below is the one progress indicator. */}
       {review && isActive(review.status) && pollError && (
         <p className="text-xs text-amber-800 dark:text-amber-300">{pollError}</p>
       )}

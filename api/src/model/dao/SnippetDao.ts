@@ -1,7 +1,17 @@
-import { Op, Transaction, WhereOptions } from 'sequelize';
+import { Op, QueryTypes, Transaction, WhereOptions } from 'sequelize';
 import db from '../../db/postgres';
 import { Snippet } from '../schema';
 import { CodeContext, Language, SnippetReviewStatus } from '../constants';
+
+// Open findings on a snippet's latest review, by severity. All zero when it was never reviewed.
+export interface FindingCounts {
+  open: number;
+  critical: number;
+  warning: number;
+  info: number;
+}
+
+const NO_FINDINGS: FindingCounts = { open: 0, critical: 0, warning: 0, info: 0 };
 
 export interface SnippetListFilter {
   language?: Language;
@@ -27,12 +37,37 @@ class SnippetDao {
     if (filter.reviewStatus) Object.assign(where, { reviewStatus: filter.reviewStatus });
     if (filter.before) Object.assign(where, { id: { [Op.lt]: filter.before } });
 
-    return Snippet.findAll({
+    const rows = await Snippet.findAll({
       where,
       attributes: { exclude: ['code'] },
       order: [['id', 'DESC']],
       limit: filter.limit,
     });
+    const counts = await this.openFindingCounts(rows.map((r) => r.id));
+    return rows.map((r) => ({ ...r.toJSON(), findingCounts: counts.get(r.id) ?? { ...NO_FINDINGS } }));
+  }
+
+  // One grouped query: each snippet's latest review (the same order findLatestForSnippet uses),
+  // and the open findings on it counted by severity. Snippets with no review, or none open, are absent.
+  async openFindingCounts(snippetIds: number[]): Promise<Map<number, FindingCounts>> {
+    const counts = new Map<number, FindingCounts>();
+    if (!snippetIds.length) return counts;
+    const rows = await db.query<FindingCounts & { snippetId: number }>(
+      `SELECT latest."snippetId" AS "snippetId",
+              count(*)::int AS open,
+              count(*) FILTER (WHERE f.severity = 'critical')::int AS critical,
+              count(*) FILTER (WHERE f.severity = 'warning')::int AS warning,
+              count(*) FILTER (WHERE f.severity = 'info')::int AS info
+         FROM (SELECT DISTINCT ON (r."snippetId") r."snippetId", r.id
+                 FROM reviews r
+                WHERE r."snippetId" IN (:snippetIds)
+                ORDER BY r."snippetId", r."createdAt" DESC, r.id DESC) latest
+         JOIN findings f ON f."reviewId" = latest.id AND f.status = 'open'
+        GROUP BY latest."snippetId"`,
+      { replacements: { snippetIds }, type: QueryTypes.SELECT },
+    );
+    for (const { snippetId, ...c } of rows) counts.set(snippetId, c);
+    return counts;
   }
 
   async setReviewStatus(ids: number | number[], reviewStatus: SnippetReviewStatus, transaction?: Transaction) {

@@ -10,8 +10,8 @@ import type {
   ReviewEvent,
   ReviewEventList,
   SnippetDetail,
-  SnippetPage,
 } from './types';
+import type { SnippetListPage } from './dashboardTypes';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000/api/v1';
 
@@ -85,9 +85,10 @@ function query(params: object): string {
   return s ? `?${s}` : '';
 }
 
-// GET /snippets — newest first. Pass the page's nextCursor as `cursor` for the next page.
-export function listSnippets(params: ListSnippetsParams = {}): Promise<SnippetPage> {
-  return api<SnippetPage>(`/snippets${query(params)}`);
+// GET /snippets — newest first, each with the open-finding counts of its latest review.
+// Pass the page's nextCursor as `cursor` for the next page.
+export function listSnippets(params: ListSnippetsParams = {}): Promise<SnippetListPage> {
+  return api<SnippetListPage>(`/snippets${query(params)}`);
 }
 
 // GET /snippets/:id — the snippet, its code and its latest review with findings.

@@ -52,7 +52,9 @@ export function FixCheckBadge({
     return <Badge className={STYLES.not_checked}>Fix not checked yet</Badge>;
   }
   return (
-    <Badge className={STYLES[fixCheck]} title={detail?.note || undefined}>
+    // The label can be long ('Partly checked: parses · no new rule issues · not verified to fix
+    // the issue'), so it wraps inside a narrow card rather than pushing past its edge.
+    <Badge className={`${STYLES[fixCheck]} !whitespace-normal`} title={detail?.note || undefined}>
       {fixCheckLabel(fixCheck, detail)}
     </Badge>
   );

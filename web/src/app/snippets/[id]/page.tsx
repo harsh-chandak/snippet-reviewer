@@ -2,9 +2,24 @@
 
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
+import { useCallback, useMemo } from 'react';
 import { ErrorBanner } from '@/components/shared';
-import { CodeView, ReviewPanel, SnippetHeader, useSnippetReview } from '@/components/snippet';
+import {
+  CodeView,
+  FindingsPanel,
+  ReviewPanel,
+  SnippetHeader,
+  useFindingsView,
+  useSnippetReview,
+} from '@/components/snippet';
 import { errorMessage } from '@/lib/api';
+import { codeLines } from '@/lib/codeLines';
+import type { Finding, FindingStatus } from '@/lib/types';
+
+const NO_FINDINGS: Finding[] = [];
+
+// Side by side, each column scrolls on its own and stays on screen; stacked on narrow screens.
+const COLUMN = 'lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)]';
 
 function BackLink() {
   return (
@@ -24,14 +39,30 @@ function LoadingSkeleton() {
   );
 }
 
-// The snippet page: header with the Review button, the review's progress or summary, then
-// the code with each finding as a comment under its line. Progress comes from polling
-// GET /reviews/:id every 2 s (see useSnippetReview).
+// The snippet page: header with the Review button, the summary and the step list (which is the
+// progress while a review runs), then the code and the findings side by side. Selecting a
+// finding highlights its lines and scrolls the code to them; a gutter dot selects its line's
+// finding. Progress comes from polling GET /reviews/:id every 2 s (see useSnippetReview).
 export default function SnippetPage() {
   const params = useParams<{ id: string }>();
   const id = Number(params.id);
   const state = useSnippetReview(id);
-  const { snippet, review } = state;
+  const { snippet, review, updateFinding } = state;
+  // Rule findings are saved when the static step ends, so they show while the model runs,
+  // and they stay when a later step fails.
+  const findings = review?.findings ?? NO_FINDINGS;
+  const view = useFindingsView(findings);
+  const { keep } = view;
+  // Split exactly as the API does (codeLines), so line N here is line N there.
+  const code = snippet?.code ?? '';
+  const lines = useMemo(() => codeLines(code).map((l) => l.replace(/\r$/, '')), [code]);
+  const setFindingStatus = useCallback(
+    (findingId: number, status: FindingStatus) => {
+      keep(findingId);
+      updateFinding(findingId, status);
+    },
+    [keep, updateFinding],
+  );
 
   if (state.notFound) {
     return (
@@ -94,17 +125,28 @@ export default function SnippetPage() {
         starting={state.starting}
         onRetry={state.start}
       />
-      <CodeView
-        code={snippet.code}
-        language={snippet.language}
-        // Rule findings are saved when the static step ends, so they show while the model
-        // runs, and they stay when a later step fails.
-        findings={review?.findings ?? []}
-        reviewActive={state.active}
-        pendingFindings={state.pendingFindings}
-        findingErrors={state.findingErrors}
-        onSetFindingStatus={state.updateFinding}
-      />
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,24rem)] lg:items-start">
+        <CodeView
+          code={snippet.code}
+          lines={lines}
+          language={snippet.language}
+          findings={view.visible}
+          selected={view.visible.find((f) => f.id === view.selectedId) ?? null}
+          highlighted={view.visible.find((f) => f.id === view.highlightedId) ?? null}
+          onSelectLine={view.selectLine}
+          className={`max-h-[70vh] ${COLUMN}`}
+        />
+        <FindingsPanel
+          view={view}
+          review={review}
+          lines={lines}
+          reviewActive={state.active}
+          pendingFindings={state.pendingFindings}
+          findingErrors={state.findingErrors}
+          onSetFindingStatus={setFindingStatus}
+          className={COLUMN}
+        />
+      </div>
     </div>
   );
 }

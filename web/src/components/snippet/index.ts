@@ -1,9 +1,12 @@
 export { CodeView } from './CodeView';
-export { FindingCard, lineLabel } from './FindingCard';
+export { FindingCard, lineLabel, STATUS_TEXT } from './FindingCard';
+export { FindingsPanel, sortFindings, useFindingsView } from './FindingsPanel';
+export type { FindingsView, SourceFilter, StatusFilter } from './FindingsPanel';
 export { ReviewPanel } from './ReviewPanel';
 export { Spinner } from './Spinner';
 export { ReviewSteps, formatMs, usageLine } from './ReviewSteps';
-export { FixDiff } from './FixDiff';
+export { FixDiff, FOLD_OVER_LINES } from './FixDiff';
 export { SnippetHeader } from './SnippetHeader';
+export { formatDuration, formatUsd } from './format';
 export { useSnippetReview, isActive, POLL_INTERVAL_MS } from './useSnippetReview';
 export { tokenizeLines, useHighlightedLines } from './highlight';

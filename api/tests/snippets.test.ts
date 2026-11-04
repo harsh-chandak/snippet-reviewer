@@ -138,6 +138,38 @@ describe('GET /snippets', () => {
     }
   });
 
+  it("gives each item findingCounts for its latest review's open findings, all zero when not reviewed", async () => {
+    const plain = await createSnippet({ language: 'go' });
+    const code = 'a\nb\nc\nd';
+    const { snippet, review } = await reviewedSnippet(
+      [
+        finding({ lineStart: 1, lineEnd: 1, severity: 'critical' }),
+        finding({ lineStart: 2, lineEnd: 2, severity: 'warning' }),
+        finding({ lineStart: 3, lineEnd: 3, severity: 'warning' }),
+        finding({ lineStart: 4, lineEnd: 4, severity: 'info' }),
+      ],
+      { language: 'go', code },
+    );
+    expect(review.status).toBe('done');
+    // A resolved finding no longer counts as open.
+    const dismissed = review.findings.find((f: any) => f.lineStart === 3);
+    const patch = await api().patch(`${V1}/findings/${dismissed.id}`).send({ status: 'dismissed' });
+    expect(patch.status).toBe(200);
+
+    const res = await api().get(`${V1}/snippets`);
+    expect(res.status).toBe(200);
+    const byId = new Map(res.body.data.items.map((s: any) => [s.id, s.findingCounts]));
+    expect(byId.get(snippet.id)).toEqual({ open: 3, critical: 1, warning: 1, info: 1 });
+    expect(byId.get(plain.id)).toEqual({ open: 0, critical: 0, warning: 0, info: 0 });
+
+    // Only the latest review counts: a new review with one info finding replaces the old counts.
+    fakeProvider.respondWith({ findings: [finding({ lineStart: 2, lineEnd: 2, severity: 'info' })] });
+    await waitForReview((await startReview(snippet.id)).id);
+    const again = await api().get(`${V1}/snippets`).query({ language: 'go' });
+    const latest = again.body.data.items.find((s: any) => s.id === snippet.id);
+    expect(latest.findingCounts).toEqual({ open: 1, critical: 0, warning: 0, info: 1 });
+  });
+
   it('filters by language', async () => {
     const py1 = await createSnippet({ language: 'python' });
     await createSnippet({ language: 'go' });

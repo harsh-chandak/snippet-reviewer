@@ -27,7 +27,7 @@ export function SnippetHeader({
   onReview: () => void;
 }) {
   const busy = active || starting;
-  const label = starting ? 'Starting…' : active ? 'Reviewing…' : review ? 'Review again' : 'Review';
+  const label = starting ? 'Starting…' : active ? 'Review running' : review ? 'Review again' : 'Review';
 
   return (
     <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
@@ -35,7 +35,9 @@ export function SnippetHeader({
         <h1 className="break-words text-2xl font-semibold tracking-tight">{snippet.title}</h1>
         <div className="flex flex-wrap items-center gap-2 text-sm text-[var(--muted)]">
           <LanguageTag language={snippet.language} />
-          <ReviewStatusBadge status={status} />
+          {/* While a review runs the step list shows its progress; a second "In progress" chip
+              here would only repeat it. */}
+          {!active && <ReviewStatusBadge status={status} />}
           <span>
             Created <time dateTime={snippet.createdAt}>{formatDate(snippet.createdAt)}</time>
           </span>
@@ -48,7 +50,8 @@ export function SnippetHeader({
         aria-busy={busy}
         className="inline-flex shrink-0 items-center justify-center gap-2 self-start rounded-md border border-green-700 bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500 disabled:cursor-not-allowed disabled:opacity-60 dark:border-green-600 dark:bg-green-700 dark:hover:bg-green-600"
       >
-        {busy && <Spinner />}
+        {/* Only before the step list exists: once the review has started, the steps show progress. */}
+        {starting && <Spinner />}
         {label}
       </button>
     </header>

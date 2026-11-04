@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { errorMessage, listSnippets } from '@/lib/api';
-import type { Snippet } from '@/lib/types';
+import type { SnippetListItem } from '@/lib/dashboardTypes';
 import { ErrorBanner } from '@/components/shared';
 import { DashboardFilters, type DashboardFilterValues } from './DashboardFilters';
 import { NoMatches, NoSnippets } from './EmptyState';
@@ -26,7 +26,7 @@ export function SnippetDashboard({
   const { language, status } = filters;
   const [phase, setPhase] = useState<Phase>('loading');
   const [error, setError] = useState<string | null>(null);
-  const [items, setItems] = useState<Snippet[]>([]);
+  const [items, setItems] = useState<SnippetListItem[]>([]);
   const [nextCursor, setNextCursor] = useState<number | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreError, setMoreError] = useState<string | null>(null);
