@@ -1,7 +1,7 @@
 import { Op, Transaction, WhereOptions } from 'sequelize';
 import db from '../../db/postgres';
 import { Snippet } from '../schema';
-import { Language, SnippetReviewStatus } from '../constants';
+import { CodeContext, Language, SnippetReviewStatus } from '../constants';
 
 export interface SnippetListFilter {
   language?: Language;
@@ -12,7 +12,7 @@ export interface SnippetListFilter {
 }
 
 class SnippetDao {
-  async create(data: { title: string; language: Language; code: string }) {
+  async create(data: { title: string; language: Language; code: string; context: CodeContext | null }) {
     return Snippet.create(data);
   }
 

@@ -1,5 +1,5 @@
 import Joi from 'joi';
-import { LANGUAGES, MAX_CODE_CHARS, MAX_CODE_LINES, SNIPPET_REVIEW_STATUSES } from '../model/constants';
+import { CODE_CONTEXTS, LANGUAGES, MAX_CODE_CHARS, MAX_CODE_LINES, SNIPPET_REVIEW_STATUSES } from '../model/constants';
 import { codeLines } from '../utils/codeLines';
 
 // Ids are Postgres integer columns; a bigger number can't be a row, and Postgres would throw on it.
@@ -30,6 +30,10 @@ export const createSnippetSchema = Joi.object({
       'string.pattern.base': 'code must not contain NUL characters',
     })
     .required(),
+  // What kind of code it is, when the user corrects the detection. 'auto' (or leaving it out) means detect it.
+  context: Joi.string()
+    .valid(...CODE_CONTEXTS, 'auto')
+    .default('auto'),
 });
 
 export const listSnippetsSchema = Joi.object({
