@@ -11,7 +11,7 @@ const stub = vi.hoisted(() => {
     if (code.includes('THROW')) throw new Error('analyzer crashed');
     const lines = code.replace(/\r?\n$/, '').split('\n');
     const bad = lines.findIndex((l) => l.includes('@@'));
-    return bad === -1 ? { ok: true, error: null, line: 0 } : { ok: false, error: `unexpected '@@' at line ${bad + 1}`, line: bad + 1 };
+    return bad === -1 ? { ok: true, error: null, line: 0 } : { ok: false, error: `unexpected '@@' at line ${bad + 1}${lines[bad].includes('PERIOD') ? '.' : ''}`, line: bad + 1 };
   }
 
   const analyzer = {
@@ -221,11 +221,25 @@ describe('checkFix', () => {
     expect(await checkFix({ source: 'rule', ruleId: 'js/loose-equality', fix: null }, code, 'javascript')).toEqual({ fixCheck: 'not_checked', detail: null });
   });
 
-  it('no analyzer for the language: not_checked, and says why', async () => {
+  it('no analyzer for the language: not_checked, and says why without claiming no rules ran', async () => {
     const result = await checkFix({ source: 'model', ruleId: null, fix: { lineStart: 1, lineEnd: 1, replacement: 'x' } }, 'a\nb', 'go');
     expect(result.fixCheck).toBe('not_checked');
     expect(result.detail).toMatchObject({ parses: null, ruleCleared: null, newRuleIds: [] });
-    expect(result.detail!.note).toMatch(/no static rules for go/i);
+    expect(result.detail!.note).toMatch(/no parser for go/i);
+    expect(result.detail!.note).toContain('any/hardcoded-secret');
+    expect(result.detail!.note).not.toMatch(/no static rules/i);
+  });
+
+  // FIX-11: the language-agnostic rules run on every language, so they check the fix too.
+  it('no analyzer for the language: a fix that adds a hard-coded secret fails', async () => {
+    const go = 'package main\nfunc main() {\n\tx := 1\n}\n';
+    const result = await checkFix(
+      { source: 'model', ruleId: null, lineStart: 3, lineEnd: 3, fix: { lineStart: 3, lineEnd: 3, replacement: '\tapiKey := "sk-live-12345abcdef"' } },
+      go,
+      'go',
+    );
+    expect(result).toMatchObject({ fixCheck: 'failed', detail: { parses: null, ruleCleared: null, newRuleIds: ['any/hardcoded-secret'] } });
+    expect(result.detail!.note).toContain('new issues: any/hardcoded-secret');
   });
 
   it('a rule fix that clears its rule passes, even though the rule still fires on another line', async () => {
@@ -236,11 +250,17 @@ describe('checkFix', () => {
     });
   });
 
-  it('a fix that does not parse fails', async () => {
+  // FIX-14: the parse failure is reported once, not again as a new js/syntax-error issue.
+  it('a fix that does not parse fails, and the failure is not also a new issue', async () => {
     const result = await checkFix(ruleFix('if (a === b) {@@'), code, 'javascript');
     expect(result.fixCheck).toBe('failed');
-    expect(result.detail).toMatchObject({ parses: false, newRuleIds: ['js/syntax-error'] });
-    expect(result.detail!.note).toContain("unexpected '@@' at line 2");
+    expect(result.detail).toMatchObject({ parses: false, newRuleIds: [] });
+    expect(result.detail!.note).toBe("The fixed code does not parse: unexpected '@@' at line 2; js/loose-equality no longer fires on the fixed lines.");
+  });
+
+  it('a parse error that ends in a period is not given a second one', async () => {
+    const result = await checkFix({ source: 'model', ruleId: null, fix: { lineStart: 1, lineEnd: 1, replacement: '@@ PERIOD' } }, code, 'javascript');
+    expect(result.detail!.note).toBe("The fixed code does not parse: unexpected '@@' at line 1.");
   });
 
   it('a fix that leaves its rule firing on the fixed lines fails', async () => {
@@ -262,9 +282,16 @@ describe('checkFix', () => {
     expect(result.detail!.newRuleIds).toEqual(['any/hardcoded-secret']);
   });
 
-  it('a rule that already fired elsewhere is not new', async () => {
+  // FIX-3: hits are compared, not ids, so a second eval() is new even though eval() already fired.
+  it('a rule that already fired elsewhere is new when the fix adds another hit of it', async () => {
     const withEval = `${code}eval(x);\n`;
     const result = await checkFix(ruleFix('if (eval(a) === b) {}'), withEval, 'javascript');
+    expect(result).toMatchObject({ fixCheck: 'failed', detail: { parses: true, ruleCleared: true, newRuleIds: ['js/eval'] } });
+  });
+
+  it('a hit the fix leaves where it was is not new', async () => {
+    const withEval = `${code}eval(x);\n`;
+    const result = await checkFix(ruleFix('if (a === b) {}'), withEval, 'javascript');
     expect(result).toMatchObject({ fixCheck: 'passed', detail: { newRuleIds: [] } });
   });
 
@@ -311,9 +338,68 @@ describe('checkFix', () => {
     expect(result.detail!.note).toBe('The fix could not be checked: analyzer crashed');
   });
 
-  it('runs the rules for the given context, before and after', async () => {
+  // FIX-4: code a fix brings in is checked by every rule, not only the ones on for this context.
+  it('runs every rule before and after, whatever the snippet\'s context', async () => {
     stub.contexts.length = 0;
     await checkFix(ruleFix('if (a === b) {}'), code, 'javascript', 'test');
-    expect(stub.contexts).toEqual(['test', 'test']);
+    expect(stub.contexts).toEqual(['unknown', 'unknown']);
+    stub.contexts.length = 0;
+    await checkFix(ruleFix('if (a === b) {}'), code, 'javascript');
+    expect(stub.contexts).toEqual(['unknown', 'unknown']);
+  });
+});
+
+// The locality rule (FIX-1): a model fix must overlap its finding's lines and may replace at most
+// the finding's span plus 10 lines.
+describe('checkFix: model fix locality', () => {
+  const twenty = Array.from({ length: 20 }, (_, i) => `const v${i + 1} = ${i + 1};`).join('\n') + '\n';
+  const model = (lineStart: number, lineEnd: number, fix: { lineStart: number; lineEnd: number; replacement: string }) => ({
+    source: 'model' as const,
+    ruleId: null,
+    lineStart,
+    lineEnd,
+    fix,
+  });
+
+  it('a fix on lines its finding is not about fails and names them', async () => {
+    // the FIX-1 repro: a style finding on line 2 whose fix rewrites line 4
+    const result = await checkFix(model(2, 2, { lineStart: 4, lineEnd: 4, replacement: 'const v4 = Infinity;' }), twenty, 'javascript');
+    expect(result).toMatchObject({ fixCheck: 'failed', detail: { parses: true, ruleCleared: null, newRuleIds: [] } });
+    expect(result.detail!.note).toBe('The fixed code parses; the fix does not overlap its finding (line 2): it touches line 4 outside the finding; no new issues.');
+  });
+
+  it('a fix that replaces more than the finding plus 10 lines fails and names the lines outside it', async () => {
+    const result = await checkFix(model(5, 5, { lineStart: 1, lineEnd: 20, replacement: '' }), twenty, 'javascript');
+    expect(result.fixCheck).toBe('failed');
+    expect(result.detail!.note).toBe(
+      'The fixed code parses; the fix replaces 20 lines for a finding on line 5, more than the finding plus 10; it touches lines 1-4 and lines 6-20 outside the finding; no new issues.',
+    );
+  });
+
+  it('a fix of exactly the finding plus 10 lines that overlaps it is allowed', async () => {
+    const result = await checkFix(model(5, 6, { lineStart: 1, lineEnd: 12, replacement: 'const v = 1;' }), twenty, 'javascript');
+    expect(result).toMatchObject({ fixCheck: 'passed', detail: { parses: true, ruleCleared: null, newRuleIds: [] } });
+  });
+
+  it('one line more than that fails', async () => {
+    const result = await checkFix(model(5, 6, { lineStart: 1, lineEnd: 13, replacement: 'const v = 1;' }), twenty, 'javascript');
+    expect(result.fixCheck).toBe('failed');
+    expect(result.detail!.note).toContain('replaces 13 lines for a finding on lines 5-6');
+  });
+
+  it('a fix inside its finding passes', async () => {
+    const result = await checkFix(model(3, 4, { lineStart: 3, lineEnd: 3, replacement: 'const v3 = 30;' }), twenty, 'javascript');
+    expect(result.fixCheck).toBe('passed');
+  });
+
+  it('rule fixes are not held to it', async () => {
+    const result = await checkFix({ source: 'rule', ruleId: 'js/loose-equality', lineStart: 9, lineEnd: 9, fix: { lineStart: 2, lineEnd: 2, replacement: 'if (a === b) {}' } }, ['const a = 1;', 'if (a == b) {}', ''].join('\n'), 'javascript');
+    expect(result.fixCheck).toBe('passed');
+  });
+
+  it('also applies to languages with no analyzer', async () => {
+    const result = await checkFix(model(1, 1, { lineStart: 3, lineEnd: 3, replacement: 'z' }), 'a\nb\nc\n', 'go');
+    expect(result.fixCheck).toBe('failed');
+    expect(result.detail!.note).toContain('it touches line 3 outside the finding');
   });
 });

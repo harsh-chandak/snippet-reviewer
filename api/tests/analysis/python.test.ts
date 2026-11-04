@@ -219,6 +219,32 @@ describe('bug and style rules, with their fixes', () => {
     expect(found[0].suggestedFix).toMatch(/isna/);
   });
 
+  // FIX-5: `arr == None` on a numpy array is an elementwise mask; `arr is None` is one False.
+  it.each([
+    ['numpy mask', py('import numpy as np', 'arr = np.array([1, None])', 'mask = arr == None', 'print(arr[mask])')],
+    ['pandas argument', py('import pandas as pd', 'keep(df.name != None)')],
+    ['numpy from-import', py('from numpy import array', 'ok = array([1]) == None')],
+  ])('py/none-comparison: no mechanical fix anywhere in a module that imports numpy or pandas (%s)', async (_name, code) => {
+    const found = await only(code, 'py/none-comparison');
+    expect(found).toHaveLength(1);
+    expect(found[0].fix).toBeNull();
+    expect(found[0].suggestedFix).toMatch(/isna/);
+    expect(found[0].suggestedFix).toMatch(/is (not )?None/);
+  });
+
+  // FIX-7: two hits on one line get one finding whose fix rewrites both.
+  it('py/none-comparison: two hits on one line are one finding with one fix that clears both', async () => {
+    const code = py('def f(a, b):', '    if a == None or b != None:', '        return 1');
+    const found = await only(code, 'py/none-comparison');
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ lineStart: 2, lineEnd: 2 });
+    expect(found[0].fix).toEqual({ lineStart: 2, lineEnd: 2, replacement: '    if a is None or b is not None:' });
+    expect(found[0].description).toContain('== and !=');
+    const { checkFix } = await import('../../src/service/analysis/fixCheck');
+    const result = await checkFix({ source: 'rule', ruleId: found[0].ruleId, fix: found[0].fix }, code, 'python');
+    expect(result).toMatchObject({ fixCheck: 'passed', detail: { parses: true, ruleCleared: true, newRuleIds: [] } });
+  });
+
   it('a fix keeps non-ASCII text before the change intact', async () => {
     const found = await only('label = "café ☕"; ok = v == None', 'py/none-comparison');
     expect(found[0].fix?.replacement).toBe('label = "café ☕"; ok = v is None');

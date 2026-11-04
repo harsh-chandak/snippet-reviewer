@@ -71,6 +71,7 @@ export function runRules(ast: Node, ctx: StatementContext): RuleFinding[] {
   ) => findings.push({ ruleId, lineStart: lines[0], lineEnd: lines[1], severity, category, description, suggestedFix, fix });
 
   const stmtLines: [number, number] = [ctx.lineStart, ctx.lineEnd];
+  const nullHits: NullHit[] = [];
   const stmtMasked = ctx.masked.slice(ctx.stmt.start, ctx.stmt.end);
   const nodeLines = (n: Node): [number, number] | null => {
     const span = nodeSpan(n, ctx);
@@ -177,21 +178,42 @@ export function runRules(ast: Node, ctx: StatementContext): RuleFinding[] {
       }
 
       if ((op === '=' || op === '<>' || op === '!=') && (n.right?.type === 'null' || n.left?.type === 'null')) {
-        const isNot = op !== '=';
-        add(
-          'sql/equals-null',
-          lines,
-          'warning',
-          'bug',
-          `Comparing with ${op} NULL is never true (the result is NULL), so this condition matches no rows.`,
-          `Use IS ${isNot ? 'NOT ' : ''}NULL.`,
-          n.right?.type === 'null' ? equalsNullFix(n, ctx) : null,
-        );
+        nullHits.push({ op, lines, edit: n.right?.type === 'null' ? equalsNullEdit(n, ctx) : null });
       }
     }
   });
 
+  // sql/equals-null: one finding per line, whose fix rewrites every hit on that line (two fixes for
+  // one line would each undo the other).
+  const byLine = new Map<number, NullHit[]>();
+  for (const hit of nullHits) byLine.set(hit.lines[0], [...(byLine.get(hit.lines[0]) ?? []), hit]);
+  for (const [line, hits] of byLine) {
+    const ops = [...new Set(hits.map((h) => h.op))];
+    const uses = [...new Set(hits.map((h) => (h.op === '=' ? 'IS NULL' : 'IS NOT NULL')))];
+    const several = hits.length > 1;
+    add(
+      'sql/equals-null',
+      [line, Math.max(...hits.map((h) => h.lines[1]))],
+      'warning',
+      'bug',
+      `Comparing with ${ops.map((o) => `${o} NULL`).join(' or ')} is never true (the result is NULL), so ${several ? 'these conditions match' : 'this condition matches'} no rows.`,
+      `Use ${uses.join(' / ')}.`,
+      hits.every((h) => h.edit) ? combinedFix(hits.map((h) => h.edit!), ctx) : null,
+    );
+  }
   return findings;
+}
+
+interface NullEdit {
+  from: number; // snippet offsets of the operator through NULL
+  to: number;
+  insert: string;
+}
+
+interface NullHit {
+  op: string;
+  lines: [number, number];
+  edit: NullEdit | null;
 }
 
 function checkJoins(
@@ -285,25 +307,30 @@ function nodeSpan(n: Node, ctx: StatementContext): [number, number] | null {
   return end > start ? [start, end] : null;
 }
 
-// `x = NULL` -> `x IS NULL`, `x <> NULL` / `x != NULL` -> `x IS NOT NULL`, on the expression's lines.
-// Only when the parser gave the expression's location and the operator is found in code, not in a
-// string or comment.
-function equalsNullFix(n: Node, ctx: StatementContext): FixReplacement | null {
+// `x = NULL` -> `x IS NULL`, `x <> NULL` / `x != NULL` -> `x IS NOT NULL`: the edit from the
+// operator to the end of NULL. Only when the parser gave the expression's location and the operator
+// is found in code, not in a string or comment.
+function equalsNullEdit(n: Node, ctx: StatementContext): NullEdit | null {
   const span = nodeSpan(n, ctx);
   if (!span) return null;
   const [from, to] = span;
   const m = /(<>|!=|=)\s*null$/i.exec(ctx.masked.slice(from, to));
   if (!m) return null;
-  const opAt = from + m.index;
+  return { from: from + m.index, to, insert: m[1] === '=' ? 'IS NULL' : 'IS NOT NULL' };
+}
+
+// One fix applying every edit, on the lines the edits touch.
+function combinedFix(edits: NullEdit[], ctx: StatementContext): FixReplacement | null {
   const lines = codeLines(ctx.code);
-  const lineStart = lineAt(ctx.code, from);
-  const lineEnd = lineAt(ctx.code, to - 1);
+  const lineStart = Math.min(...edits.map((e) => lineAt(ctx.code, e.from)));
+  const lineEnd = Math.max(...edits.map((e) => lineAt(ctx.code, e.to - 1)));
   if (lineEnd > lines.length) return null;
   // Offset of the first character of lineStart in the snippet.
   let lineOffset = 0;
   for (let k = 0; k < lineStart - 1; k++) lineOffset += lines[k].length + 1;
-  const original = lines.slice(lineStart - 1, lineEnd).join('\n');
-  const rel = opAt - lineOffset;
-  const replacement = original.slice(0, rel) + (m[1] === '=' ? 'IS NULL' : 'IS NOT NULL') + original.slice(to - lineOffset);
-  return { lineStart, lineEnd, replacement };
+  let text = lines.slice(lineStart - 1, lineEnd).join('\n');
+  for (const e of [...edits].sort((a, b) => b.from - a.from)) {
+    text = text.slice(0, e.from - lineOffset) + e.insert + text.slice(e.to - lineOffset);
+  }
+  return { lineStart, lineEnd, replacement: text };
 }

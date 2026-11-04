@@ -198,6 +198,29 @@ describe('model findings', () => {
     expect(result.findings[0].fix).toEqual({ lineStart: 1, lineEnd: 1, replacement: 'x' });
   });
 
+  // FIX-8: Postgres refuses U+0000 in text and jsonb, so a NUL from the model used to fail the review.
+  it('drops a fix whose replacement holds a NUL, keeping the finding', async () => {
+    fakeProvider.respondWith({ findings: [finding({ fix: { lineStart: 3, lineEnd: 3, replacement: '  account.balance -= amount;\u0000' } })] });
+    const result = await llmService.reviewSnippet(input());
+    expect(result.rejected).toEqual([]);
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0].fix).toBeNull();
+  });
+
+  it('removes NUL from the description and suggested fix', async () => {
+    fakeProvider.respondWith({ findings: [finding({ description: 'Bad\u0000 thing\u0000', suggestedFix: '\u0000Do x' })] });
+    const result = await llmService.reviewSnippet(input());
+    expect(result.findings[0]).toMatchObject({ description: 'Bad thing', suggestedFix: 'Do x' });
+    expect(JSON.stringify(result.findings)).not.toContain('\\u0000');
+  });
+
+  it('rejects a description that was only NULs, as an empty one', async () => {
+    fakeProvider.respondWith({ findings: [finding({ description: '\u0000\u0000' })] });
+    const result = await llmService.reviewSnippet(input());
+    expect(result.findings).toEqual([]);
+    expect(result.rejected).toHaveLength(1);
+  });
+
   it('fails when the answer has no findings list', async () => {
     fakeProvider.respondWith({ notFindings: true });
     await expect(llmService.reviewSnippet(input())).rejects.toBeInstanceOf(LlmError);

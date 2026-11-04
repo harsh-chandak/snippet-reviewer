@@ -1,12 +1,13 @@
 import { CodeContext, FindingSource, FixCheck, Language } from '../../model/constants';
 import { codeLines } from '../../utils/codeLines';
+import { COMMON_RULE_IDS } from './common';
 import { analyzerFor, analyzeSnippet } from './index';
 import { FixReplacement, RuleFinding } from './types';
 
 export interface FixCheckDetail {
   parses: boolean | null; // the fixed code parses; null when the language has no analyzer
   ruleCleared: boolean | null; // a rule finding's ruleId no longer fires on the fixed lines; null for model findings
-  newRuleIds: string[]; // rule ids that fire on the fixed code but did not fire on the original
+  newRuleIds: string[]; // rule ids that fire more times on the fixed code than on the original
   note: string; // the result in plain words, for the page
 }
 
@@ -56,32 +57,82 @@ function errorText(err: unknown): string {
   return (err instanceof Error ? err.message : String(err)).replace(/[\u0000-\u001f\u007f]+/g, ' ').slice(0, 300);
 }
 
+// A model fix may write at most this many lines beyond its finding's span.
+export const MODEL_FIX_EXTRA_LINES = 10;
+
+function lineRange(start: number, end: number): string {
+  return start === end ? `line ${start}` : `lines ${start}-${end}`;
+}
+
+// The lines of `fix` that lie outside `start..end`, in words ("lines 1-2 and 5"), or null if none do.
+function outsideLines(fix: FixReplacement, start: number, end: number): string | null {
+  const parts: string[] = [];
+  if (fix.lineStart < start) parts.push(lineRange(fix.lineStart, Math.min(fix.lineEnd, start - 1)));
+  if (fix.lineEnd > end) parts.push(lineRange(Math.max(fix.lineStart, end + 1), fix.lineEnd));
+  return parts.length ? parts.join(' and ') : null;
+}
+
+// The locality rule for model fixes: the fix must overlap its finding's lines and may replace at
+// most the finding's span plus MODEL_FIX_EXTRA_LINES. Returns the reason it fails, or null.
+function localityProblem(fix: FixReplacement, lineStart: number, lineEnd: number): string | null {
+  const finding = lineRange(lineStart, lineEnd);
+  const outside = outsideLines(fix, lineStart, lineEnd);
+  if (fix.lineEnd < lineStart || fix.lineStart > lineEnd) {
+    return `the fix does not overlap its finding (${finding}): it touches ${lineRange(fix.lineStart, fix.lineEnd)} outside the finding`;
+  }
+  const span = lineEnd - lineStart + 1;
+  const replaced = fix.lineEnd - fix.lineStart + 1;
+  if (replaced > span + MODEL_FIX_EXTRA_LINES) {
+    return `the fix replaces ${replaced} lines for a finding on ${finding}, more than the finding plus ${MODEL_FIX_EXTRA_LINES}; it touches ${outside} outside the finding`;
+  }
+  return null;
+}
+
+// How many times each rule id fires.
+function hitCounts(findings: RuleFinding[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const f of findings) counts.set(f.ruleId, (counts.get(f.ruleId) ?? 0) + 1);
+  return counts;
+}
+
+// Rule ids that fire more times after the fix than before: comparing hits, not ids, so a second
+// eval() smuggled in next to an existing one still counts as new.
+function newIssues(before: RuleFinding[], after: RuleFinding[]): string[] {
+  const was = hitCounts(before);
+  return [...hitCounts(after)].filter(([id, n]) => n > (was.get(id) ?? 0)).map(([id]) => id).sort();
+}
+
+const isSyntaxError = (ruleId: string) => ruleId.endsWith('/syntax-error');
+
+// Every rule on, whatever the snippet's context: 'unknown' is the context that runs them all, so
+// code a fix brings in is checked even when its rules are off for this kind of snippet.
+const ALL_RULES_CONTEXT: CodeContext = 'unknown';
+
+// The finding a fix belongs to. lineStart/lineEnd are the finding's lines; a model fix is held to
+// them (the locality rule) when they are given.
+export interface FixCheckInput {
+  source: FindingSource;
+  ruleId: string | null;
+  fix: FixReplacement | null;
+  lineStart?: number;
+  lineEnd?: number;
+}
+
 // Checks a finding's proposed fix mechanically: apply it, then ask the language's analyzer whether
 // the result parses, whether the finding's rule still fires on the fixed lines, and whether any rule
-// fires that didn't before. 'passed' when every check that could run holds and nothing new fires,
-// 'failed' when one doesn't, 'not_checked' when there is no fix or no analyzer for the language.
+// fires more often than before (before and after both analysed with every rule on). A model fix must
+// also stay near its finding. 'passed' when every check that could run holds and nothing new fires,
+// 'failed' when one doesn't, 'not_checked' when there is no fix, or no analyzer and nothing failed.
 // Never throws: an analyzer error comes back as 'not_checked' with the error in the note.
+// `_context` is accepted for the caller's sake and ignored: the check always runs every rule.
 export async function checkFix(
-  finding: { source: FindingSource; ruleId: string | null; fix: FixReplacement | null },
+  finding: FixCheckInput,
   code: string,
   language: Language,
-  context?: CodeContext,
+  _context?: CodeContext,
 ): Promise<{ fixCheck: FixCheck; detail: FixCheckDetail | null }> {
   const { fix } = finding;
   if (!fix) return { fixCheck: 'not_checked', detail: null };
-
-  const analyzer = analyzerFor(language);
-  if (!analyzer) {
-    return {
-      fixCheck: 'not_checked',
-      detail: {
-        parses: null,
-        ruleCleared: null,
-        newRuleIds: [],
-        note: `There are no static rules for ${language}, so this fix could not be checked.`,
-      },
-    };
-  }
 
   let fixed: string;
   try {
@@ -91,26 +142,57 @@ export async function checkFix(
     return { fixCheck: 'failed', detail: { parses: null, ruleCleared: null, newRuleIds: [], note: err.message } };
   }
 
+  const locality =
+    finding.source === 'model' && finding.lineStart !== undefined && finding.lineEnd !== undefined
+      ? localityProblem(fix, finding.lineStart, finding.lineEnd)
+      : null;
+
   try {
-    const parsed = await analyzer.parses(fixed, language);
     const [before, after] = await Promise.all([
-      analyzeSnippet(language, code, context),
-      analyzeSnippet(language, fixed, context),
+      analyzeSnippet(language, code, ALL_RULES_CONTEXT),
+      analyzeSnippet(language, fixed, ALL_RULES_CONTEXT),
     ]);
 
+    const analyzer = analyzerFor(language);
+    if (!analyzer) {
+      // No parser for the language, but the language-agnostic rules (any/hardcoded-secret) still
+      // run on every snippet, so a fix that adds one of their hits is failed.
+      const newRuleIds = newIssues(before.findings, after.findings);
+      const notes = [`There is no parser for ${language}, so whether the fixed code parses was not checked`];
+      if (locality) notes.push(locality);
+      notes.push(
+        newRuleIds.length === 0
+          ? `the language-agnostic rules (${COMMON_RULE_IDS.join(', ')}) find no new issues`
+          : `new issues: ${newRuleIds.join(', ')}`,
+      );
+      const failed = newRuleIds.length > 0 || !!locality;
+      return {
+        fixCheck: failed ? 'failed' : 'not_checked',
+        detail: { parses: null, ruleCleared: null, newRuleIds, note: `${notes.join('; ')}.` },
+      };
+    }
+
+    const parsed = await analyzer.parses(fixed, language);
     const checksRule = finding.source === 'rule' && !!finding.ruleId;
     const ruleCleared = checksRule
       ? !after.findings.some((f) => f.ruleId === finding.ruleId && touchesFixedLines(f, fix))
       : null;
-    const beforeIds = new Set(before.findings.map((f) => f.ruleId));
-    const newRuleIds = [...new Set(after.findings.map((f) => f.ruleId))].filter((id) => !beforeIds.has(id)).sort();
+    // A parse failure is reported once, as parses: false, not again as a new syntax-error issue.
+    const newRuleIds = newIssues(before.findings, after.findings).filter((id) => parsed.ok || !isSyntaxError(id));
 
-    const passed = parsed.ok && ruleCleared !== false && newRuleIds.length === 0;
+    const passed = parsed.ok && ruleCleared !== false && newRuleIds.length === 0 && !locality;
     const notes: string[] = [];
-    notes.push(parsed.ok ? 'The fixed code parses' : `The fixed code does not parse${parsed.error ? `: ${errorText(parsed.error)}` : ''}`);
+    notes.push(
+      parsed.ok
+        ? 'The fixed code parses'
+        : `The fixed code does not parse${parsed.error ? `: ${errorText(parsed.error).replace(/[.\s]+$/, '')}` : ''}`,
+    );
+    if (locality) notes.push(locality);
     if (ruleCleared === true) notes.push(`${finding.ruleId} no longer fires on the fixed lines`);
     if (ruleCleared === false) notes.push(`${finding.ruleId} still fires on the fixed lines`);
-    notes.push(newRuleIds.length === 0 ? 'no new issues' : `new issues: ${newRuleIds.join(', ')}`);
+    if (parsed.ok || newRuleIds.length > 0) {
+      notes.push(newRuleIds.length === 0 ? 'no new issues' : `new issues: ${newRuleIds.join(', ')}`);
+    }
 
     return {
       fixCheck: passed ? 'passed' : 'failed',

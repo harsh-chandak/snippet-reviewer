@@ -100,7 +100,7 @@ class LlmService {
     const result: ReviewResult = { findings: [], rejected: [], duplicates: 0, duplicateHits: [], usage, sent };
 
     for (const item of items) {
-      const { error, value } = findingValidator.validate(item, { stripUnknown: true });
+      const { error, value } = findingValidator.validate(withoutNulText(item), { stripUnknown: true });
       if (error) {
         result.rejected.push({ finding: item, reason: error.message });
       } else if (value.lineEnd > lineCount) {
@@ -124,11 +124,24 @@ class LlmService {
   }
 }
 
-// The model's fix if it is well formed and inside the snippet, else null.
+// Postgres refuses U+0000 in text and jsonb, so one NUL from the model would fail the whole review
+// when its findings are saved. It is removed from the description and suggested fix before they are
+// validated (so a description that was only NULs is still rejected as empty).
+function withoutNulText(item: unknown): unknown {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+  const out: Record<string, unknown> = { ...(item as Record<string, unknown>) };
+  for (const key of ['description', 'suggestedFix']) {
+    if (typeof out[key] === 'string') out[key] = (out[key] as string).replace(/\u0000/g, '');
+  }
+  return out;
+}
+
+// The model's fix if it is well formed and inside the snippet, else null. A replacement holding a
+// NUL is dropped rather than edited: removing characters from code changes what the fix does.
 function checkedFix(fix: unknown, lineCount: number): LlmFinding['fix'] {
   if (fix === undefined || fix === null) return null;
   const { error, value } = fixValidator.validate(fix, { stripUnknown: true });
-  if (error || value.lineEnd > lineCount) return null;
+  if (error || value.lineEnd > lineCount || value.replacement.includes('\u0000')) return null;
   return value;
 }
 

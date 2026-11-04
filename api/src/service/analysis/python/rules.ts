@@ -377,9 +377,13 @@ const noneComparison: PythonRule = {
   id: 'py/none-comparison',
   contexts: 'all',
   run({ root, src, imports }) {
-    const out: RuleFinding[] = [];
-    // With numpy/pandas, `col == None` inside df[...] is elementwise; `is` would change its meaning.
+    // With numpy or pandas imported, `x == None` may be elementwise on an array or column anywhere
+    // (a mask, a filter, an argument), and `is None` would turn it into a single False. So no
+    // mechanical fix at all in such a module; the suggestion says what to use in words.
     const arrayLibrary = imports.modules.has('numpy') || imports.modules.has('pandas');
+    // One finding per line (the line of the operator), whose fix rewrites every hit on that line,
+    // like the JS rules: two fixes for one line would each undo the other.
+    const byLine = new Map<number, { cmp: Node; op: Node; replacement: string; simple: boolean }[]>();
     for (const cmp of descendants(root, 'comparison_operator')) {
       const parts = children(cmp);
       for (let i = 0; i < parts.length; i++) {
@@ -388,30 +392,37 @@ const noneComparison: PythonRule = {
         const prev = parts[i - 1];
         const next = parts[i + 1];
         if (prev?.type !== 'none' && next?.type !== 'none') continue;
-        const replacement = op.type === '==' ? 'is' : 'is not';
-        let fix: RuleFinding['fix'] = null;
-        const inSubscript = hasAncestor(cmp, 'subscript');
-        const simple = parts.length === 3;
-        if (simple && !(arrayLibrary && inSubscript)) {
-          const line = src.startLine(op);
-          const text = src.text(line);
-          const from = src.column(line, op.startIndex);
-          const to = src.column(line, op.endIndex);
-          fix = { lineStart: line, lineEnd: line, replacement: `${text.slice(0, from)}${replacement}${text.slice(to)}` };
-        }
-        out.push(
-          finding(this.id, src, cmp, {
-            severity: 'info',
-            category: 'style',
-            description: `Comparing to None with ${op.type} calls __eq__, which a class can override; '${replacement} None' checks identity, which is what is meant.`,
-            suggestedFix:
-              arrayLibrary && inSubscript
-                ? 'For a pandas or numpy column, use .isna() / .notna() instead.'
-                : `Use '${replacement} None'.`,
-            fix,
-          }),
-        );
+        const line = src.startLine(op);
+        const hit = { cmp, op, replacement: op.type === '==' ? 'is' : 'is not', simple: parts.length === 3 };
+        byLine.set(line, [...(byLine.get(line) ?? []), hit]);
       }
+    }
+
+    const out: RuleFinding[] = [];
+    for (const [line, hits] of byLine) {
+      let fix: RuleFinding['fix'] = null;
+      if (!arrayLibrary && hits.every((h) => h.simple)) {
+        let text = src.text(line);
+        const edits = hits
+          .map((h) => ({ from: src.column(line, h.op.startIndex), to: src.column(line, h.op.endIndex), insert: h.replacement }))
+          .sort((a, b) => b.from - a.from);
+        for (const e of edits) text = `${text.slice(0, e.from)}${e.insert}${text.slice(e.to)}`;
+        fix = { lineStart: line, lineEnd: line, replacement: text };
+      }
+      const ops = [...new Set(hits.map((h) => h.op.type as string))];
+      const fixes = [...new Set(hits.map((h) => `'${h.replacement} None'`))];
+      out.push({
+        ruleId: this.id,
+        lineStart: Math.min(...hits.map((h) => src.startLine(h.cmp))),
+        lineEnd: Math.max(...hits.map((h) => src.endLine(h.cmp))),
+        severity: 'info',
+        category: 'style',
+        description: `Comparing to None with ${ops.join(' and ')} calls __eq__, which a class can override; ${fixes.join(' and ')} ${fixes.length > 1 ? 'check' : 'checks'} identity, which is what is meant.`,
+        suggestedFix: arrayLibrary
+          ? `If this is a pandas or numpy value, ${ops.join(' and ')} None compares element by element: use .isna() / .notna() for a column or array, and ${fixes.join(' / ')} only for a single value.`
+          : `Use ${fixes.join(' and ')}.`,
+        fix,
+      });
     }
     return out;
   },

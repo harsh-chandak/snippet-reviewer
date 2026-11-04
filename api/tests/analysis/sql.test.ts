@@ -235,3 +235,37 @@ describe('sql analyzer: sql/equals-null and its mechanical fix', () => {
     expect(f.fix).toEqual({ lineStart: 3, lineEnd: 3, replacement: 'WHERE a IS NULL\r' });
   });
 });
+
+// FIX-7: two hits on one line used to get two fixes that each fixed one hit, so both failed the check.
+describe('sql analyzer: sql/equals-null with several hits on one line', () => {
+  it('reports one finding for the line, whose fix rewrites every hit and clears the rule', async () => {
+    const code = 'SELECT id FROM users WHERE deleted_at = NULL OR banned_at <> NULL;\n';
+    const found = await only(code, 'sql/equals-null');
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ lineStart: 1, lineEnd: 1, severity: 'warning', category: 'bug' });
+    expect(found[0].description).toContain('= NULL or <> NULL');
+    expect(found[0].suggestedFix).toBe('Use IS NULL / IS NOT NULL.');
+    expect(found[0].fix).toEqual({
+      lineStart: 1,
+      lineEnd: 1,
+      replacement: 'SELECT id FROM users WHERE deleted_at IS NULL OR banned_at IS NOT NULL;',
+    });
+    const fixed = applyFix(code, found[0].fix!);
+    expect(await sqlAnalyzer.parses(fixed, 'sql')).toEqual({ ok: true, error: null });
+    expect(await ids(fixed)).toEqual([]);
+  });
+
+  it('gives the line no mechanical fix when one of its hits has NULL on the left', async () => {
+    const found = await only('SELECT x FROM t WHERE a = NULL OR NULL = b', 'sql/equals-null');
+    expect(found).toHaveLength(1);
+    expect(found[0].fix).toBeNull();
+  });
+
+  it('the fix passes the fix checker (the FIX-7 repro)', async () => {
+    const { checkFix } = await import('../../src/service/analysis/fixCheck');
+    const code = 'SELECT id FROM users WHERE deleted_at = NULL OR banned_at = NULL;';
+    const [f] = await only(code, 'sql/equals-null');
+    const result = await checkFix({ source: 'rule', ruleId: f.ruleId, fix: f.fix }, code, 'sql');
+    expect(result).toMatchObject({ fixCheck: 'passed', detail: { parses: true, ruleCleared: true, newRuleIds: [] } });
+  });
+});
