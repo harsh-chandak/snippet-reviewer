@@ -2,6 +2,8 @@
 
 Paste a code snippet and get a review in two parts. First, deterministic rules run on the parsed code, so their findings have exact lines and cost nothing. Then an AI model reviews what the rules can't see. Every finding is linked to its lines, can be marked valid or not an issue, and comes with a proposed fix that has been checked.
 
+**Demo video (66 s, narrated):** https://drive.google.com/file/d/1Cfob6FfUps0UPmuHTgFAjhbCtTpbWCGR/view?usp=sharing
+
 ## Run it
 
 **With an API key (one command):**
