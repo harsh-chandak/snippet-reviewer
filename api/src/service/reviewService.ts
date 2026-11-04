@@ -7,6 +7,9 @@ import { llmService } from './llmService';
 import { LlmError } from './llm/types';
 import { HttpError } from '../utils/httpError';
 
+// Thrown inside run() when the review is no longer in the state this run expects.
+class SupersededError extends Error {}
+
 class ReviewService {
   // Records the review and returns at once. The model call runs in the background;
   // the client polls GET /reviews/:id to follow it.
@@ -42,9 +45,12 @@ class ReviewService {
   }
 
   // Every path ends with the review marked done or failed, so nothing is left "in progress".
+  // Each step only moves the review on from the state it expects. If something else moved it
+  // first (another instance marked it failed at startup, say), this run stops and writes nothing.
   private async run(reviewId: number, snippetId: number, language: string, code: string) {
     try {
-      await reviewDao.update(reviewId, { status: 'running', startedAt: new Date() });
+      const started = await reviewDao.updateIfStatus(reviewId, ['pending'], { status: 'running', startedAt: new Date() });
+      if (!started) throw new SupersededError();
       const result = await llmService.reviewSnippet(language, code);
 
       if (result.rejected.length) {
@@ -52,22 +58,33 @@ class ReviewService {
       }
 
       await db.transaction(async (transaction) => {
-        await findingDao.createForReview(reviewId, result.findings, transaction);
-        await reviewDao.update(
+        const finished = await reviewDao.updateIfStatus(
           reviewId,
+          ['running'],
           { status: 'done', rejectedCount: result.rejected.length, completedAt: new Date() },
           transaction,
         );
-        await snippetDao.setReviewStatus(snippetId, 'reviewed', transaction);
+        if (!finished) throw new SupersededError();
+        await findingDao.createForReview(reviewId, result.findings, transaction);
+        await snippetDao.setReviewStatusIfLatest(snippetId, reviewId, 'reviewed', transaction);
       });
     } catch (err) {
+      if (err instanceof SupersededError) {
+        console.warn(`[review ${reviewId}] was moved on by something else; leaving it as it is`);
+        return;
+      }
       console.error(`[review ${reviewId}] failed`, err, err instanceof LlmError ? err.cause : '');
       // Only our own LlmError messages are safe and useful to show the user.
       const message = err instanceof LlmError ? err.message : 'The review failed unexpectedly';
       await db
         .transaction(async (transaction) => {
-          await reviewDao.update(reviewId, { status: 'failed', error: message, completedAt: new Date() }, transaction);
-          await snippetDao.setReviewStatus(snippetId, 'failed', transaction);
+          const failed = await reviewDao.updateIfStatus(
+            reviewId,
+            ['pending', 'running'],
+            { status: 'failed', error: message, completedAt: new Date() },
+            transaction,
+          );
+          if (failed) await snippetDao.setReviewStatusIfLatest(snippetId, reviewId, 'failed', transaction);
         })
         .catch((saveErr) => console.error(`[review ${reviewId}] could not record failure`, saveErr));
     }

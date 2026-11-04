@@ -40,6 +40,13 @@ class ReviewDao {
   async update(id: number | number[], data: ReviewUpdate, transaction?: Transaction) {
     await Review.update(data, { where: { id }, transaction });
   }
+
+  // Moves a review on only if it is still in one of `from`. Returns false when something else
+  // (a restart on another instance, say) already moved it, so the caller must not overwrite it.
+  async updateIfStatus(id: number, from: ReviewStatus[], data: ReviewUpdate, transaction?: Transaction) {
+    const [count] = await Review.update(data, { where: { id, status: from }, transaction });
+    return count > 0;
+  }
 }
 
 export const reviewDao = new ReviewDao();

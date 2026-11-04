@@ -1,4 +1,5 @@
 import { Op, Transaction, WhereOptions } from 'sequelize';
+import db from '../../db/postgres';
 import { Snippet } from '../schema';
 import { Language, SnippetReviewStatus } from '../constants';
 
@@ -36,6 +37,20 @@ class SnippetDao {
 
   async setReviewStatus(ids: number | number[], reviewStatus: SnippetReviewStatus, transaction?: Transaction) {
     await Snippet.update({ reviewStatus }, { where: { id: ids }, transaction });
+  }
+
+  // The snippet mirrors its latest review only. An older review finishing late must not set it.
+  async setReviewStatusIfLatest(
+    snippetId: number,
+    reviewId: number,
+    reviewStatus: SnippetReviewStatus,
+    transaction?: Transaction,
+  ) {
+    const latest = db.literal(
+      `(SELECT r.id FROM reviews r WHERE r."snippetId" = ${Number(snippetId)} ` +
+        `ORDER BY r."createdAt" DESC, r.id DESC LIMIT 1) = ${Number(reviewId)}`,
+    );
+    await Snippet.update({ reviewStatus }, { where: { id: snippetId, [Op.and]: [latest] }, transaction });
   }
 }
 

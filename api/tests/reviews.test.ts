@@ -107,6 +107,28 @@ describe('POST /snippets/:id/reviews', () => {
     expect(review).toMatchObject({ status: 'done', rejectedCount: 2, findings: [] });
   });
 
+  it('a review moved on by something else cannot overwrite it, the newer review or the snippet', async () => {
+    const snippet = await createSnippet({ code: FIVE_LINES });
+    // The first review's model answer arrives late, after a restart elsewhere failed it and a new review finished.
+    fakeProvider.respondWith({ findings: [finding({ description: 'late answer' })] }, { delayMs: 1500 });
+    const first = await startReview(snippet.id);
+    await expect.poll(async () => (await Review.findByPk(first.id))?.status, { timeout: 5000 }).toBe('running');
+
+    await reviewService.failInterrupted();
+    fakeProvider.respondWith({ findings: [finding({ description: 'second review' })] });
+    const second = await waitForReview((await startReview(snippet.id)).id);
+    expect(second.status).toBe('done');
+
+    await new Promise((r) => setTimeout(r, 2000));
+    const late = await Review.findByPk(first.id, { include: ['findings'] });
+    expect(late?.status).toBe('failed');
+    expect(late?.findings).toHaveLength(0);
+    const after = await getSnippet(snippet.id);
+    expect(after.reviewStatus).toBe('reviewed');
+    expect(after.latestReview.id).toBe(second.id);
+    expect(after.latestReview.findings.map((f: { description: string }) => f.description)).toEqual(['second review']);
+  });
+
   it('drops findings past the last line and invalid ones, and counts them in rejectedCount', async () => {
     const snippet = await createSnippet({ code: 'a\nb\nc' });
     fakeProvider.respondWith({
