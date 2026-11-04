@@ -2,16 +2,34 @@ import { GenerateInput, GenerateResult, LlmError, LlmProvider, LlmUsage, tokenCo
 
 const API_URL = 'https://api.anthropic.com/v1/messages';
 const API_VERSION = '2023-06-01';
-const TOOL_NAME = 'submit_review';
+
+// Structured outputs accept a subset of JSON Schema: no numeric or length limits, and every object
+// must say additionalProperties: false. Those limits are still enforced on our side after the
+// answer comes back (reviewSchema's validators), so dropping them here loses nothing.
+const UNSUPPORTED_KEYWORDS = new Set(['minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf', 'minLength', 'maxLength', 'minItems', 'maxItems']);
+
+export function toApiSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) return schema.map(toApiSchema);
+  if (typeof schema !== 'object' || schema === null) return schema;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(schema)) {
+    if (UNSUPPORTED_KEYWORDS.has(key)) continue;
+    out[key] = key === 'enum' || key === 'required' ? value : toApiSchema(value);
+  }
+  if (out.type === 'object') out.additionalProperties = false;
+  return out;
+}
 
 // Production provider: calls the Anthropic Messages API with an API key.
-// Structured output comes from forcing one tool whose input schema is our review schema.
+// Structured output comes from output_config.format with our review schema. (Current models
+// refuse a forced tool_choice, which is how this used to be done.)
 class AnthropicProvider implements LlmProvider {
   readonly name = 'anthropic';
 
   private model = process.env.LLM_MODEL || 'claude-sonnet-5-5';
   private timeoutMs = Number(process.env.LLM_TIMEOUT_MS) || 120000;
-  private maxTokens = 8192;
+  // The model thinks before answering, and thinking counts against this too.
+  private maxTokens = 16000;
 
   async generateStructured(input: GenerateInput): Promise<GenerateResult> {
     // Read at call time, so the app still starts (and tests still run) without a key.
@@ -38,14 +56,7 @@ class AnthropicProvider implements LlmProvider {
           max_tokens: this.maxTokens,
           system: input.system,
           messages: [{ role: 'user', content: input.prompt }],
-          tools: [
-            {
-              name: TOOL_NAME,
-              description: 'Submit the review findings for the snippet.',
-              input_schema: input.jsonSchema,
-            },
-          ],
-          tool_choice: { type: 'tool', name: TOOL_NAME },
+          output_config: { format: { type: 'json_schema', schema: toApiSchema(input.jsonSchema) } },
         }),
       });
     } catch (err) {
@@ -69,18 +80,28 @@ class AnthropicProvider implements LlmProvider {
       throw new LlmError(`The Anthropic API returned ${res.status}: ${detail}`, body);
     }
 
-    // A cut-off answer can still contain a tool_use block with partial input; don't trust it.
+    // A cut-off answer is partial JSON; don't trust it.
     if (body?.stop_reason === 'max_tokens') {
       throw new LlmError('The model ran out of room before finishing the review', body);
     }
+    // A declined request carries no answer that matches the schema.
+    if (body?.stop_reason === 'refusal') {
+      throw new LlmError('The model declined to review this snippet', body);
+    }
 
-    const block = Array.isArray(body?.content)
-      ? body.content.find((b: any) => b?.type === 'tool_use' && b?.name === TOOL_NAME)
-      : undefined;
-    if (!block) {
+    const text = Array.isArray(body?.content)
+      ? body.content
+          .filter((b: any) => b?.type === 'text' && typeof b.text === 'string')
+          .map((b: any) => b.text)
+          .join('')
+      : '';
+    let output: unknown;
+    try {
+      output = JSON.parse(text);
+    } catch (err) {
       throw new LlmError('The model did not return structured output', body);
     }
-    return { output: block.input, usage: usageFrom(body, this.model) };
+    return { output, usage: usageFrom(body, this.model) };
   }
 }
 

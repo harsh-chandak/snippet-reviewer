@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { anthropicProvider, usageFrom } from '../../src/service/llm/anthropicProvider';
+import { anthropicProvider, toApiSchema, usageFrom } from '../../src/service/llm/anthropicProvider';
+import { reviewJsonSchema } from '../../src/service/llm/reviewSchema';
 
 // The provider against a stubbed fetch; never the real API.
 const PRICES = {
@@ -18,8 +19,8 @@ function setPrices(values: Partial<typeof PRICES>) {
 
 const body = {
   model: 'claude-sonnet-5-5-20261001',
-  stop_reason: 'tool_use',
-  content: [{ type: 'tool_use', name: 'submit_review', input: { findings: [] } }],
+  stop_reason: 'end_turn',
+  content: [{ type: 'text', text: '{"findings":[]}' }],
   usage: { input_tokens: 1000, output_tokens: 200, cache_read_input_tokens: 5000, cache_creation_input_tokens: 400 },
 };
 
@@ -84,5 +85,39 @@ describe('anthropic usage', () => {
   it('still refuses a cut-off answer', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ...body, stop_reason: 'max_tokens' }))));
     await expect(anthropicProvider.generateStructured(input)).rejects.toThrow('ran out of room');
+  });
+});
+
+describe('anthropic structured output', () => {
+  it('asks for the review schema through output_config, not a forced tool', async () => {
+    await anthropicProvider.generateStructured({ system: 's', prompt: 'p', jsonSchema: reviewJsonSchema });
+    const sent = JSON.parse((vi.mocked(fetch).mock.calls[0][1] as RequestInit).body as string);
+    expect(sent.tool_choice).toBeUndefined();
+    expect(sent.tools).toBeUndefined();
+    expect(sent.output_config.format.type).toBe('json_schema');
+    expect(sent.output_config.format.schema).toEqual(toApiSchema(reviewJsonSchema));
+  });
+
+  it('drops the limits the API does not accept and closes every object', () => {
+    const schema = toApiSchema(reviewJsonSchema) as any;
+    const text = JSON.stringify(schema);
+    expect(text).not.toMatch(/"(minimum|maxLength)"/);
+    expect(schema.additionalProperties).toBe(false);
+    expect(schema.properties.findings.items.additionalProperties).toBe(false);
+    expect(schema.properties.findings.items.properties.fix.additionalProperties).toBe(false);
+    // enum values and required lists come through as they are
+    expect(schema.properties.findings.items.required).toEqual(reviewJsonSchema.properties.findings.items.required);
+    // the shared schema itself is not changed
+    expect(reviewJsonSchema.properties.summary.maxLength).toBe(400);
+  });
+
+  it('refuses an answer that is not JSON', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ...body, content: [{ type: 'text', text: 'Sure! Here is' }] }))));
+    await expect(anthropicProvider.generateStructured(input)).rejects.toThrow('did not return structured output');
+  });
+
+  it('says so when the model declines', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ...body, stop_reason: 'refusal', content: [] }))));
+    await expect(anthropicProvider.generateStructured(input)).rejects.toThrow('declined');
   });
 });
