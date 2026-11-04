@@ -15,7 +15,7 @@ docker compose up --build
 - API: http://localhost:4000/api/v1/health
 - Postgres: localhost:5433 (user, password and database are all `snippets`)
 
-The API runs its migrations when it starts, so a fresh database gets its tables automatically. To show a cost for each review, also set the four `LLM_PRICE_*_PER_MTOK` values (input, output, cache read, cache write, in dollars per million tokens). Without them the page shows token counts and says "cost not configured". It never guesses a price.
+The API runs its migrations when it starts, so a fresh database gets its tables automatically. Each review's cost is its token counts times the model's list price, from a small dated table in `api/src/service/llm/prices.ts` (the API reports tokens, never dollars). To use other prices, set all four `LLM_PRICE_*_PER_MTOK` values. A model that is neither listed nor configured shows its token counts and "cost not configured". It never guesses a price.
 
 **With a Claude Code login instead of a key** (how I developed it): the default provider, `claude-headless`, runs the local `claude -p` CLI, so the API has to run on your machine rather than in Docker.
 

@@ -13,8 +13,9 @@ const M005 = '005-review-events.ts';
 const M006 = '006-event-fixes.ts';
 const M007 = '007-analysis-error.ts';
 const M008 = '008-review-summary.ts';
+const M009 = '009-cost-source-price-table.ts';
 // The last migration: every test that runs them all up again ends here.
-const LATEST = M008;
+const LATEST = M009;
 
 const NEW_COLUMNS: Record<string, Record<string, { type: string; nullable: boolean; default: string | null }>> = {
   reviews: {
@@ -547,7 +548,7 @@ describe('migration 007-analysis-error', () => {
 
 describe('migration 008-review-summary', () => {
   it('is applied by the test setup: reviews.summary text null, default NULL', async () => {
-    expect((await executed()).at(-1)).toBe(M008);
+    expect((await executed()).at(-1)).toBe(LATEST);
     expect((await columns('reviews')).summary).toEqual({ type: 'text', nullable: true, default: null });
   });
 
@@ -563,7 +564,38 @@ describe('migration 008-review-summary', () => {
 
   it('goes up again, with the summary null on old rows', async () => {
     await migrator.up();
-    expect((await executed()).at(-1)).toBe(M008);
+    expect((await executed()).at(-1)).toBe(LATEST);
     expect(await select('SELECT summary FROM reviews')).toEqual([{ summary: null }]);
+  });
+});
+
+describe('migration 009-cost-source-price-table', () => {
+  it('is applied by the test setup: costSource accepts price-table and still refuses a guess', async () => {
+    expect((await executed()).at(-1)).toBe(M009);
+    await db.query('TRUNCATE TABLE review_events, findings, reviews, snippets RESTART IDENTITY CASCADE');
+    await insertReview({});
+    expect(await rejects(`UPDATE reviews SET "costSource" = 'price-table', "costUsd" = 0.0084`)).toBeNull();
+    expect(await rejects(`UPDATE reviews SET "costSource" = 'guess'`)).toBe('reviews_cost_source_check');
+  });
+
+  it('goes down to 008, clearing list-priced costs and keeping the other ones', async () => {
+    await db.query('TRUNCATE TABLE review_events, findings, reviews, snippets RESTART IDENTITY CASCADE');
+    const listed = await insertReview({});
+    const configured = await insertReview({});
+    await db.query(`UPDATE reviews SET "costSource" = 'price-table', "costUsd" = 0.0084 WHERE id = :id`, { replacements: { id: listed } });
+    await db.query(`UPDATE reviews SET "costSource" = 'price-config', "costUsd" = 0.01 WHERE id = :id`, { replacements: { id: configured } });
+    await migrator.down({ to: M009 });
+    expect((await executed()).at(-1)).toBe(M008);
+    expect(await select('SELECT id, "costSource", "costUsd" FROM reviews ORDER BY id')).toEqual([
+      { id: listed, costSource: null, costUsd: null },
+      { id: configured, costSource: 'price-config', costUsd: 0.01 },
+    ]);
+    expect(await rejects(`UPDATE reviews SET "costSource" = 'price-table'`)).toBe('reviews_cost_source_check');
+  });
+
+  it('goes up again', async () => {
+    await migrator.up();
+    expect((await executed()).at(-1)).toBe(M009);
+    expect(await rejects(`UPDATE reviews SET "costSource" = 'price-table'`)).toBeNull();
   });
 });

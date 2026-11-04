@@ -1,4 +1,5 @@
 import { GenerateInput, GenerateResult, LlmError, LlmProvider, LlmUsage, tokenCount } from './types';
+import { listPrice, ModelPrice } from './prices';
 
 const API_URL = 'https://api.anthropic.com/v1/messages';
 const API_VERSION = '2023-06-01';
@@ -112,18 +113,22 @@ const PRICE_SETTINGS = [
   'LLM_PRICE_CACHE_WRITE_PER_MTOK',
 ] as const;
 
-// USD per million tokens, from the environment. No price is ever written into the code: unless
-// all four settings are present and valid numbers, the call is not priced at all.
-function priceConfig(): number[] | null {
+// An override from the environment, USD per million tokens: used only when all four settings are
+// present and valid numbers (for a negotiated rate, or a model the list doesn't have).
+function priceOverride(): ModelPrice | null {
   const prices = PRICE_SETTINGS.map((name) => {
     const raw = process.env[name]?.trim();
     const value = raw ? Number(raw) : NaN;
     return Number.isFinite(value) && value >= 0 ? value : null;
   });
-  return prices.every((p) => p !== null) ? (prices as number[]) : null;
+  if (!prices.every((p) => p !== null)) return null;
+  const [input, output, cacheRead, cacheWrite] = prices as number[];
+  return { input, output, cacheRead, cacheWrite };
 }
 
 // Tokens from the Messages API response's `usage`; the model is the one the API says answered.
+// Priced from the LLM_PRICE_* override if it's complete, else from the list price for that model,
+// else not priced at all.
 export function usageFrom(body: any, requestedModel: string): LlmUsage | null {
   const usage = body?.usage;
   if (typeof usage !== 'object' || usage === null) return null;
@@ -134,17 +139,21 @@ export function usageFrom(body: any, requestedModel: string): LlmUsage | null {
     cacheReadTokens: tokenCount(usage.cache_read_input_tokens),
     cacheWriteTokens: tokenCount(usage.cache_creation_input_tokens),
   };
-  const prices = priceConfig();
-  const costUsd = prices
-    ? (tokens.inputTokens * prices[0] +
-        tokens.outputTokens * prices[1] +
-        tokens.cacheReadTokens * prices[2] +
-        tokens.cacheWriteTokens * prices[3]) /
+  const model = (typeof body?.model === 'string' && body.model ? body.model : requestedModel).slice(0, 80);
+
+  const override = priceOverride();
+  const promptTokens = tokens.inputTokens + tokens.cacheReadTokens + tokens.cacheWriteTokens;
+  const price = override ?? listPrice(model, promptTokens);
+  const costUsd = price
+    ? (tokens.inputTokens * price.input +
+        tokens.outputTokens * price.output +
+        tokens.cacheReadTokens * price.cacheRead +
+        tokens.cacheWriteTokens * price.cacheWrite) /
       1_000_000
     : null;
-  const model = typeof body?.model === 'string' && body.model ? body.model : requestedModel;
+  const costSource = override ? 'price-config' : price ? 'price-table' : null;
 
-  return { model: model.slice(0, 80), ...tokens, costUsd, costSource: prices ? 'price-config' : null };
+  return { model, ...tokens, costUsd, costSource };
 }
 
 export const anthropicProvider = new AnthropicProvider();

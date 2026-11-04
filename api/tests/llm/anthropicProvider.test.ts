@@ -55,24 +55,24 @@ describe('anthropic usage', () => {
     expect(result.usage!.costUsd).toBeCloseTo(0.009, 10);
   });
 
-  it('leaves the cost null unless every price is set', async () => {
+  it('ignores an override that is missing a price, and uses the list price instead', async () => {
     setPrices({ LLM_PRICE_INPUT_PER_MTOK: '3', LLM_PRICE_OUTPUT_PER_MTOK: '15', LLM_PRICE_CACHE_READ_PER_MTOK: '0.3' });
     const { usage } = await anthropicProvider.generateStructured(input);
-    expect(usage).toMatchObject({ inputTokens: 1000, costUsd: null, costSource: null });
+    expect(usage).toMatchObject({ inputTokens: 1000, costSource: 'price-table' });
   });
 
-  it('leaves the cost null when a price is not a number', async () => {
+  it('ignores an override with a price that is not a number', async () => {
     setPrices({ ...PRICES, LLM_PRICE_OUTPUT_PER_MTOK: 'fifteen' });
-    expect((await anthropicProvider.generateStructured(input)).usage).toMatchObject({ costUsd: null, costSource: null });
+    expect((await anthropicProvider.generateStructured(input)).usage).toMatchObject({ costSource: 'price-table' });
     setPrices({ ...PRICES, LLM_PRICE_OUTPUT_PER_MTOK: '-1' });
-    expect((await anthropicProvider.generateStructured(input)).usage).toMatchObject({ costUsd: null, costSource: null });
+    expect((await anthropicProvider.generateStructured(input)).usage).toMatchObject({ costSource: 'price-table' });
   });
 
   it('returns usage null when the response has none, and the requested model when none is named', () => {
     expect(usageFrom({ content: [] }, 'claude-sonnet-5-5')).toBeNull();
     setPrices({});
-    expect(usageFrom({ usage: { input_tokens: 1 } }, 'claude-sonnet-5-5')).toEqual({
-      model: 'claude-sonnet-5-5',
+    expect(usageFrom({ usage: { input_tokens: 1 } }, 'some-unlisted-model')).toEqual({
+      model: 'some-unlisted-model',
       inputTokens: 1,
       outputTokens: 0,
       cacheReadTokens: 0,
@@ -119,5 +119,45 @@ describe('anthropic structured output', () => {
   it('says so when the model declines', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ...body, stop_reason: 'refusal', content: [] }))));
     await expect(anthropicProvider.generateStructured(input)).rejects.toThrow('declined');
+  });
+});
+
+describe('anthropic list prices', () => {
+  beforeEach(() => setPrices({}));
+  const usage = { input_tokens: 1000, output_tokens: 200, cache_read_input_tokens: 5000, cache_creation_input_tokens: 400 };
+
+  it('prices claude-sonnet-5-5 at its list price, dated id or not', () => {
+    // (1000*2 + 200*10 + 5000*0.10 + 400*2.50) / 1e6
+    for (const model of ['claude-sonnet-5-5', 'claude-sonnet-5-5-20261001']) {
+      const priced = usageFrom({ model, usage }, 'x')!;
+      expect(priced.costSource).toBe('price-table');
+      expect(priced.costUsd).toBeCloseTo(0.0055, 12);
+    }
+  });
+
+  it('the review on the page: 1,229 in and 76 out on claude-sonnet-5-5', () => {
+    const priced = usageFrom({ model: 'claude-sonnet-5-5', usage: { input_tokens: 1229, output_tokens: 76 } }, 'x')!;
+    // (1229*2 + 76*10) / 1e6
+    expect(priced.costUsd).toBeCloseTo(0.003218, 12);
+  });
+
+  it('charges Haiku 5.5 its higher prices once the prompt, cache included, is over 100,000 tokens', () => {
+    const short = usageFrom({ model: 'claude-haiku-5-5', usage: { input_tokens: 50_000, cache_read_input_tokens: 50_000, output_tokens: 1000 } }, 'x')!;
+    // (50000*0.10 + 50000*0.01 + 1000*0.50) / 1e6
+    expect(short.costUsd).toBeCloseTo(0.006, 12);
+    const long = usageFrom({ model: 'claude-haiku-5-5', usage: { input_tokens: 50_001, cache_read_input_tokens: 50_000, output_tokens: 1000 } }, 'x')!;
+    // (50001*0.50 + 50000*0.05 + 1000*2.50) / 1e6
+    expect(long.costUsd).toBeCloseTo(0.0300005, 12);
+  });
+
+  it('leaves a model it has no price for unpriced, even one whose name starts like a listed one', () => {
+    for (const model of ['claude-sonnet-5-5-preview', 'claude-sonnet-4-6', 'constructor', '__proto__']) {
+      expect(usageFrom({ model, usage }, 'x')).toMatchObject({ costUsd: null, costSource: null });
+    }
+  });
+
+  it('lets a complete override win over the list price', () => {
+    setPrices(PRICES);
+    expect(usageFrom({ model: 'claude-sonnet-5-5', usage }, 'x')).toMatchObject({ costSource: 'price-config' });
   });
 });

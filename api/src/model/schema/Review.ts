@@ -21,7 +21,7 @@ export interface PhaseTimings {
   failedPhase?: 'static' | 'model' | 'checking';
 }
 
-export const COST_SOURCES = ['cli', 'price-config'] as const;
+export const COST_SOURCES = ['cli', 'price-config', 'price-table'] as const;
 export type CostSource = (typeof COST_SOURCES)[number];
 
 // One run of the model over one snippet. A snippet can be reviewed again, so it keeps every run.

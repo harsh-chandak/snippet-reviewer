@@ -1,5 +1,6 @@
 // Tokens and cost of one model call. costUsd is null when nothing can price it: the CLI reports
-// its own estimate ('cli'); the API provider prices tokens from the LLM_PRICE_* settings ('price-config').
+// its own estimate ('cli'); the API provider prices tokens from the LLM_PRICE_* settings when all four
+// are set ('price-config'), else from the list price for the model ('price-table', see prices.ts).
 export interface LlmUsage {
   model: string;
   inputTokens: number;
@@ -7,7 +8,7 @@ export interface LlmUsage {
   cacheReadTokens: number;
   cacheWriteTokens: number;
   costUsd: number | null;
-  costSource: 'cli' | 'price-config' | null;
+  costSource: 'cli' | 'price-config' | 'price-table' | null;
 }
 
 export interface GenerateInput {

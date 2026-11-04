@@ -422,7 +422,9 @@ export function usageLine(review: Review): string {
         ? " (CLI estimate)"
         : review.costSource === "price-config"
           ? " (priced from settings)"
-          : "";
+          : review.costSource === "price-table"
+            ? " (list price)"
+            : "";
     parts.push(`~${formatUsd(review.costUsd)}${source}`);
   }
   return parts.join(" · ");

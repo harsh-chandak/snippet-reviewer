@@ -67,8 +67,9 @@ export type FindingSource = (typeof FINDING_SOURCES)[number];
 export const FIX_CHECKS = ['not_checked', 'passed', 'failed'] as const;
 export type FixCheck = (typeof FIX_CHECKS)[number];
 
-// Where costUsd came from: the CLI's own total, or token counts priced from LLM_PRICE_* settings.
-export const COST_SOURCES = ['cli', 'price-config'] as const;
+// Where costUsd came from: the CLI's own total, token counts priced from LLM_PRICE_* settings, or
+// token counts priced at the model's list price.
+export const COST_SOURCES = ['cli', 'price-config', 'price-table'] as const;
 export type CostSource = (typeof COST_SOURCES)[number];
 
 // One item in GET /snippets. The list leaves out `code`.
