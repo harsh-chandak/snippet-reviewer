@@ -18,6 +18,13 @@ class ClaudeHeadlessProvider implements LlmProvider {
       '--output-format', 'json',
       '--json-schema', JSON.stringify(input.jsonSchema),
       '--tools', '',
+      // `--tools ''` only removes the built-in tools. Without the next four flags the CLI also loads
+      // the developer's MCP servers, plugins, skills and settings, so untrusted snippet text would sit
+      // next to real tools (measured: 380 tools, ~358K input tokens per review; isolated: 1 tool, ~1.5K).
+      '--strict-mcp-config',
+      '--mcp-config', '{"mcpServers":{}}',
+      '--setting-sources', '',
+      '--disable-slash-commands',
       '--no-session-persistence',
       '--model', this.model,
     ];
