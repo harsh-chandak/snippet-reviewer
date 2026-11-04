@@ -4,6 +4,8 @@ import { fakeProvider } from './llm/fakeProvider';
 import { buildReviewPrompt, REVIEW_SYSTEM_PROMPT } from './llm/prompt';
 import { findingValidator, LlmFinding, MAX_FINDINGS, reviewJsonSchema } from './llm/reviewSchema';
 import { LlmError, LlmProvider } from './llm/types';
+import { CodeContext, Language } from '../model/constants';
+import { OutlineItem, RuleFinding } from './analysis/types';
 import { codeLines } from '../utils/codeLines';
 
 function pickProvider(): LlmProvider {
@@ -21,8 +23,34 @@ function pickProvider(): LlmProvider {
   }
 }
 
+// What the model is given: the code, what kind of code it is and why we think so, its outline,
+// and what the static rules already found (so the model doesn't repeat them).
+export interface ReviewInput {
+  language: Language;
+  code: string;
+  context: CodeContext;
+  signals: string[];
+  outline: OutlineItem[];
+  ruleFindings: RuleFinding[];
+}
+
+// Tokens and cost of one model call. costUsd is null when nothing can price it: the CLI reports
+// its own estimate ('cli'); the API provider prices tokens from the LLM_PRICE_* settings ('price-config').
+export interface LlmUsage {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd: number | null;
+  costSource: 'cli' | 'price-config' | null;
+}
+
 export interface ReviewResult {
   findings: LlmFinding[];
+  // Model findings dropped because a rule already reported the same thing.
+  duplicates: number;
+  usage: LlmUsage | null;
   // Findings we threw away, and why. Worth logging: a rising count means the prompt or model changed.
   rejected: { finding: unknown; reason: string }[];
 }
@@ -34,7 +62,7 @@ class LlmService {
     return this.provider.name;
   }
 
-  async reviewSnippet(language: string, code: string): Promise<ReviewResult> {
+  async reviewSnippet({ language, code }: ReviewInput): Promise<ReviewResult> {
     const raw = await this.provider.generateStructured({
       system: REVIEW_SYSTEM_PROMPT,
       prompt: buildReviewPrompt(language, code),
@@ -47,7 +75,7 @@ class LlmService {
     }
 
     const lineCount = codeLines(code).length;
-    const result: ReviewResult = { findings: [], rejected: [] };
+    const result: ReviewResult = { findings: [], rejected: [], duplicates: 0, usage: null };
 
     for (const item of items) {
       const { error, value } = findingValidator.validate(item, { stripUnknown: true });

@@ -1,5 +1,6 @@
 import Joi from 'joi';
 import { CATEGORIES, SEVERITIES } from '../../model/constants';
+import type { FixReplacement } from '../analysis/types';
 
 export interface LlmFinding {
   lineStart: number;
@@ -8,6 +9,7 @@ export interface LlmFinding {
   category: (typeof CATEGORIES)[number];
   description: string;
   suggestedFix?: string | null;
+  fix?: FixReplacement | null;
 }
 
 // Sent to the model so it answers in this exact shape.

@@ -6,6 +6,7 @@ import { findingDao } from '../model/dao/FindingDao';
 import { llmService } from './llmService';
 import { LlmError } from './llm/types';
 import { HttpError } from '../utils/httpError';
+import { Language } from '../model/constants';
 import { toUserMessage } from '../utils/userMessage';
 
 // Thrown inside run() when the review is no longer in the state this run expects.
@@ -52,7 +53,14 @@ class ReviewService {
     try {
       const started = await reviewDao.updateIfStatus(reviewId, ['pending'], { status: 'running', startedAt: new Date() });
       if (!started) throw new SupersededError();
-      const result = await llmService.reviewSnippet(language, code);
+      const result = await llmService.reviewSnippet({
+        language: language as Language,
+        code,
+        context: 'unknown',
+        signals: [],
+        outline: [],
+        ruleFindings: [],
+      });
 
       if (result.rejected.length) {
         console.warn(`[review ${reviewId}] dropped ${result.rejected.length} finding(s)`, result.rejected);
