@@ -137,11 +137,104 @@ export interface Review {
   cacheWriteTokens: number | null;
   costUsd: number | null; // null when no price is known; never estimated by the frontend
   costSource: CostSource | null;
+  promptVersion?: string | null; // 12 hex chars of the prompt the model got; null before the event log
+  rulesetVersion?: string | null; // 12 hex chars of the rule ids and parser versions; null before the event log
   startedAt: string | null;
   completedAt: string | null;
   createdAt: string;
   updatedAt: string;
   findings?: Finding[];
+}
+
+// What happened during a review, one row per thing, in order (GET /reviews/:id/events).
+export const REVIEW_EVENT_TYPES = [
+  'review.started',
+  'static.parsed',
+  'static.rule_hit',
+  'model.called',
+  'model.failed',
+  'model.finding_kept',
+  'model.finding_rejected',
+  'model.duplicate',
+  'fix.checked',
+  'review.done',
+  'review.failed',
+  'finding.resolved',
+  'events.truncated',
+] as const;
+export type ReviewEventType = (typeof REVIEW_EVENT_TYPES)[number];
+
+// The payload of each event type, as the API writes it.
+export interface ReviewEventPayloads {
+  'review.started': { provider: string };
+  'static.parsed': {
+    supported: boolean;
+    parseOk: boolean | null;
+    parseError: string | null;
+    context: CodeContext | null;
+    signals: string[];
+    outlineItems: number;
+    rulesChecked?: string[];
+    ms: number;
+  };
+  'static.rule_hit': {
+    ruleId: string;
+    lineStart: number;
+    lineEnd: number;
+    severity: Severity;
+    category: Category;
+    hasFix: boolean;
+  };
+  'model.called': {
+    provider: string;
+    model: string | null;
+    promptVersion: string | null;
+    context: CodeContext | null;
+    hintsSent: number;
+    outlineItemsSent: number;
+    promptChars: number;
+    inputTokens: number | null;
+    outputTokens: number | null;
+    cacheReadTokens: number | null;
+    cacheWriteTokens: number | null;
+    totalInputTokens: number | null;
+    costUsd: number | null;
+    costSource: CostSource | null;
+    ms: number;
+  };
+  'model.failed': { message: string; ms: number };
+  'model.finding_kept': {
+    lineStart: number;
+    lineEnd: number;
+    severity: Severity;
+    category: Category;
+    hasFix: boolean;
+  };
+  'model.finding_rejected': { reason: string; raw: string }; // raw: the suggestion as JSON, cut to 2000 chars
+  'model.duplicate': { lineStart: number; category: Category; ruleId: string | null };
+  'fix.checked': {
+    findingId: number;
+    source: FindingSource;
+    ruleId: string | null;
+    fixCheck: FixCheck;
+    parses: boolean | null;
+    ruleCleared: boolean | null;
+    newRuleIds: string[];
+  };
+  'review.done': { ms: number; findings: number; ruleFindings: number; modelFindings: number };
+  'review.failed': { phase: ReviewPhase | string; message: string; ms: number };
+  'finding.resolved': { findingId: number; reviewId: number; from: FindingStatus; to: FindingStatus };
+  'events.truncated': { dropped: number };
+}
+
+// One row of review_events. Narrow on `type` to get the payload's shape.
+export type ReviewEvent = {
+  [T in ReviewEventType]: { id: number; reviewId: number; type: T; payload: ReviewEventPayloads[T]; createdAt: string };
+}[ReviewEventType];
+
+// GET /reviews/:id/events.
+export interface ReviewEventList {
+  items: ReviewEvent[];
 }
 
 // GET /snippets/:id: the snippet with its code and its most recent review (null if never reviewed).

@@ -1,8 +1,10 @@
 'use client';
 
+import { useId, useState } from 'react';
 import { ContextTag } from '@/components/shared';
 import { REVIEW_STEPS, STATIC_LANGUAGES } from '@/lib/types';
 import type { CodeContext, Language, Review, ReviewStep } from '@/lib/types';
+import { StepEvents, useReviewEvents } from './ReviewEvents';
 import { Spinner } from './Spinner';
 import { isActive } from './useSnippetReview';
 
@@ -117,19 +119,58 @@ function stepDetail(step: ReviewStep, state: StepState, review: Review, staticRu
   return null;
 }
 
+function Chevron({ open }: { open: boolean }) {
+  return (
+    <svg
+      aria-hidden
+      viewBox="0 0 16 16"
+      className={`h-3 w-3 shrink-0 fill-current text-[var(--muted)] transition-transform ${open ? 'rotate-90' : ''}`}
+    >
+      <path d="M6.22 3.22a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06-1.06L9.94 8 6.22 4.28a.75.75 0 0 1 0-1.06Z" />
+    </svg>
+  );
+}
+
+// A step can be opened once it has started; a waiting or skipped step has nothing to list.
+function canOpen(state: StepState): boolean {
+  return state === 'running' || state === 'done' || state === 'failed';
+}
+
 function StepList({ review, language }: { review: Review; language: Language }) {
   const states = stepStates(review);
   const timings = review.phaseTimings ?? {};
   // Before the static step reports, go by the language.
   const staticRules = review.staticSupported ?? STATIC_LANGUAGES.includes(language);
+  // Collapsed by default; a new review starts collapsed again.
+  const [open, setOpen] = useState<{ reviewId: number; steps: ReadonlySet<ReviewStep> }>({
+    reviewId: review.id,
+    steps: new Set(),
+  });
+  const openSteps = open.reviewId === review.id ? open.steps : new Set<ReviewStep>();
+  const toggle = (step: ReviewStep) => {
+    const next = new Set(openSteps);
+    if (next.has(step)) next.delete(step);
+    else next.add(step);
+    setOpen({ reviewId: review.id, steps: next });
+  };
+  // While the review runs each poll hands us a new review object: refetch with it. Once it
+  // has finished the mark stops changing, so an open step does not refetch on every render.
+  const pollMark = isActive(review.status) ? review : review.status;
+  const events = useReviewEvents(review.id, openSteps.size > 0, pollMark);
+  const failedAt = REVIEW_STEPS.find((step) => states[step] === 'failed') ?? null;
+  const baseId = useId();
+
   return (
     <ol aria-label="Review steps" className="space-y-1.5">
       {REVIEW_STEPS.map((step) => {
         const state = states[step];
         const detail = stepDetail(step, state, review, staticRules);
         const ms = timings[step];
-        return (
-          <li key={step} className="flex items-center gap-2.5 text-sm">
+        const expandable = canOpen(state);
+        const isOpen = expandable && openSteps.has(step);
+        const panelId = `${baseId}-${step}-events`;
+        const row = (
+          <>
             <span className="flex h-4 w-4 shrink-0 items-center justify-center">
               <StepIcon state={state} />
             </span>
@@ -138,9 +179,29 @@ function StepList({ review, language }: { review: Review; language: Language }) 
             </span>
             <span className="sr-only">: {STATE_WORDS[state]}</span>
             {detail && <span className="min-w-0 truncate text-xs text-[var(--muted)]">{detail}</span>}
-            {ms !== undefined && (
-              <span className="ml-auto shrink-0 text-xs tabular-nums text-[var(--muted)]">{formatMs(ms)}</span>
+            <span className="ml-auto flex shrink-0 items-center gap-2">
+              {ms !== undefined && <span className="text-xs tabular-nums text-[var(--muted)]">{formatMs(ms)}</span>}
+              {expandable && <Chevron open={isOpen} />}
+            </span>
+          </>
+        );
+        return (
+          <li key={step} className="text-sm">
+            {expandable ? (
+              <button
+                type="button"
+                aria-expanded={isOpen}
+                aria-controls={isOpen ? panelId : undefined}
+                onClick={() => toggle(step)}
+                className="-mx-1.5 flex w-[calc(100%+0.75rem)] items-center gap-2.5 rounded px-1.5 py-0.5 text-left hover:bg-[var(--background)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-blue-500"
+              >
+                {row}
+                <span className="sr-only">{isOpen ? ', hide events' : ', show events'}</span>
+              </button>
+            ) : (
+              <div className="flex items-center gap-2.5 py-0.5">{row}</div>
             )}
+            {isOpen && <StepEvents id={panelId} step={step} state={events} review={review} failedAt={failedAt} />}
           </li>
         );
       })}
@@ -178,15 +239,21 @@ function formatUsd(usd: number): string {
   return `$${Number(usd.toPrecision(2))}`;
 }
 
-// '1,467 in · 312 out · 0 cache · 4.2 s · ~$0.007 (CLI estimate)'. The cost is only what the
-// API saved; with no costUsd it says 'cost not configured' rather than guess a price.
+// '1,950 in (1,948 written to cache · 0 read from cache · 2 uncached) · 407 out · 5.8 s ·
+// ~$0.0089 (CLI estimate)'. Total input is uncached + read from cache + written to cache: the
+// CLI caches the prompt, so inputTokens alone hides most of what was sent. The cost is only
+// what the API saved; with no costUsd it says 'cost not configured' rather than guess a price.
 export function usageLine(review: Review): string {
   const parts: string[] = [];
   const tokens = [review.inputTokens, review.outputTokens, review.cacheReadTokens, review.cacheWriteTokens];
   if (tokens.some((t) => t !== null && t !== undefined)) {
-    parts.push(`${count(review.inputTokens ?? 0)} in`);
+    const uncached = review.inputTokens ?? 0;
+    const read = review.cacheReadTokens ?? 0;
+    const written = review.cacheWriteTokens ?? 0;
+    parts.push(
+      `${count(uncached + read + written)} in (${count(written)} written to cache · ${count(read)} read from cache · ${count(uncached)} uncached)`,
+    );
     parts.push(`${count(review.outputTokens ?? 0)} out`);
-    parts.push(`${count((review.cacheReadTokens ?? 0) + (review.cacheWriteTokens ?? 0))} cache`);
   } else {
     parts.push('tokens not reported');
   }
