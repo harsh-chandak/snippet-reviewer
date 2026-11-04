@@ -19,9 +19,13 @@ import type { Finding, FindingStatus } from '@/lib/types';
 
 const NO_FINDINGS: Finding[] = [];
 
-// Side by side (lg and up), each column is as tall as the viewport minus the 3.5rem header
-// (never under 480px), stays on screen and scrolls on its own; stacked on narrow screens.
-const COLUMN = 'lg:sticky lg:top-2 lg:h-[max(480px,calc(100vh_-_3.5rem))]';
+// Side by side (lg and up), each column stays on screen and scrolls on its own; stacked on
+// narrow screens. The findings column is as tall as the viewport minus the 3.5rem header (never
+// under 480px); the code column is as tall as its code up to that same cap, so a short snippet
+// doesn't sit in a window-tall empty panel.
+// (Written out in full: Tailwind only sees class names that appear whole in the source.)
+const FINDINGS_COLUMN = 'lg:sticky lg:top-2 lg:h-[max(480px,calc(100vh_-_3.5rem))]';
+const CODE_COLUMN = 'lg:sticky lg:top-2 lg:max-h-[max(480px,calc(100vh_-_3.5rem))]';
 
 // The layout's content box is max-w-5xl; code needs more room than that. From lg up the page
 // widens itself to at most 1600px, centred on the viewport, with the layout's 24px gutter each
@@ -161,7 +165,7 @@ export default function SnippetPage() {
             selected={view.visible.find((f) => f.id === view.selectedId) ?? null}
             highlighted={view.visible.find((f) => f.id === view.highlightedId) ?? null}
             onSelectLine={view.selectLine}
-            className={`max-h-[70vh] lg:max-h-none lg:min-w-0 lg:flex-1 ${COLUMN}`}
+            className={`max-h-[70vh] lg:min-w-0 lg:flex-1 ${CODE_COLUMN}`}
           />
           <FindingsPanel
             view={view}
@@ -171,7 +175,7 @@ export default function SnippetPage() {
             pendingFindings={state.pendingFindings}
             findingErrors={state.findingErrors}
             onSetFindingStatus={setFindingStatus}
-            className={`lg:w-[400px] lg:shrink-0 ${COLUMN}`}
+            className={`lg:w-[400px] lg:shrink-0 ${FINDINGS_COLUMN}`}
           />
         </div>
       </div>

@@ -462,3 +462,61 @@ describe('rule findings and the finding API', () => {
     expect((await getSnippet(snippet.id)).latestReview.findings[0]).toMatchObject({ id: rule.id, status: 'dismissed' });
   });
 });
+
+describe('summary', () => {
+  const SUMMARY = 'Checks whether a number is zero. The main risk is the loose equality, which also treats "" and [] as zero.';
+
+  it('saves the summary the model wrote with its findings, and the snippet page reads it', async () => {
+    const snippet = await createSnippet({ code: LOOSE_EQUALITY });
+    fakeProvider.respondWith({
+      summary: `  ${SUMMARY}\n`,
+      findings: [finding({ lineStart: 1, lineEnd: 3, category: 'style', description: 'Name it isZeroish' })],
+    });
+
+    const review = await waitForReview((await startReview(snippet.id)).id);
+
+    expect(review).toMatchObject({ status: 'done', summary: SUMMARY });
+    expect(modelFindings(review).map((f: any) => f.description)).toEqual(['Name it isZeroish']);
+    expect((await getSnippet(snippet.id)).latestReview.summary).toBe(SUMMARY);
+  });
+
+  it('is null while the model runs, when the model wrote none, and on a review the model failed', async () => {
+    const snippet = await createSnippet({ code: LOOSE_EQUALITY });
+    fakeProvider.respondWith({ summary: SUMMARY, findings: [] }, { delayMs: 300 });
+    const started = await startReview(snippet.id);
+    expect((await pollReview(started.id, (r) => r.phase === 'model')).summary).toBeNull();
+    expect((await waitForReview(started.id)).summary).toBe(SUMMARY);
+
+    fakeProvider.respondWith({ findings: [] });
+    expect((await waitForReview((await startReview(snippet.id)).id)).summary).toBeNull();
+
+    fakeProvider.failWith('The review timed out after 120 s');
+    const failed = await waitForReview((await startReview(snippet.id)).id);
+    expect(failed).toMatchObject({ status: 'failed', summary: null });
+  });
+
+  it('an invalid summary is just null: the review is done and keeps every finding', async () => {
+    const snippet = await createSnippet({ code: LOOSE_EQUALITY });
+    fakeProvider.respondWith({
+      summary: { text: 'not a string' },
+      findings: [finding({ lineStart: 1, lineEnd: 1, category: 'style', description: 'kept' })],
+    });
+
+    const review = await waitForReview((await startReview(snippet.id)).id);
+
+    expect(review).toMatchObject({ status: 'done', summary: null, rejectedCount: 0 });
+    expect(ruleFindings(review)).toHaveLength(1);
+    expect(modelFindings(review).map((f: any) => f.description)).toEqual(['kept']);
+  });
+
+  it('saves a summary with control characters and NUL stripped, cut to 400 characters', async () => {
+    const snippet = await createSnippet({ code: LOOSE_EQUALITY });
+    fakeProvider.respondWith({ summary: `Line\u0000 one.\u001b[2J ${'x'.repeat(600)}`, findings: [] });
+
+    const review = await waitForReview((await startReview(snippet.id)).id);
+
+    expect(review.status).toBe('done');
+    expect(review.summary).toHaveLength(400);
+    expect(review.summary.startsWith('Line one. xxx')).toBe(true);
+  });
+});

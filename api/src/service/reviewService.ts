@@ -293,18 +293,16 @@ class ReviewService {
 
       const modelResult = { ...result, usage: clampUsage(result.usage) };
       await db.transaction(async (transaction) => {
-        const toChecking = await reviewDao.updateIfStatus(
-          reviewId,
-          ['running'],
-          {
-            phase: 'checking',
-            phaseTimings: { ...timings },
-            rejectedCount: modelResult.rejected.length,
-            duplicateCount: modelResult.duplicates,
-            ...usageColumns(modelResult.usage),
-          },
-          transaction,
-        );
+        // The summary is saved with the model's other results (migration 008).
+        const toCheckingUpdate: ReviewUpdate & { summary: string | null } = {
+          phase: 'checking',
+          phaseTimings: { ...timings },
+          summary: modelResult.summary,
+          rejectedCount: modelResult.rejected.length,
+          duplicateCount: modelResult.duplicates,
+          ...usageColumns(modelResult.usage),
+        };
+        const toChecking = await reviewDao.updateIfStatus(reviewId, ['running'], toCheckingUpdate, transaction);
         if (!toChecking) throw new SupersededError();
         const usage = modelResult.usage;
         events.add(

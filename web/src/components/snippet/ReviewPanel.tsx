@@ -125,6 +125,55 @@ function Summary({ review }: { review: Review }) {
   );
 }
 
+export type Verdict = 'changes_needed' | 'suggestions' | 'looks_good';
+
+// The verdict, computed here from the review's open findings and never by the model, so it can't
+// contradict the findings list: any open critical -> Changes needed; else any open warning or
+// info -> Looks good, with suggestions; else Looks good. It follows the findings as they are
+// marked. None for a review that isn't done, and none when the model's answer couldn't be used
+// (it returned suggestions and none passed our checks): half a review gets no verdict.
+export function reviewVerdict(review: Review): Verdict | null {
+  if (review.status !== 'done') return null;
+  const findings = review.findings ?? [];
+  if (review.rejectedCount > 0 && !findings.some((f) => f.source === 'model')) return null;
+  const open = findings.filter((f) => f.status === 'open');
+  if (open.some((f) => f.severity === 'critical')) return 'changes_needed';
+  if (open.length > 0) return 'suggestions';
+  return 'looks_good';
+}
+
+const VERDICTS: Record<Verdict, { label: string; text: string; dot: string }> = {
+  changes_needed: { label: 'Changes needed', text: 'text-red-700 dark:text-red-400', dot: 'bg-red-500' },
+  suggestions: {
+    label: 'Looks good, with suggestions',
+    text: 'text-amber-800 dark:text-amber-300',
+    dot: 'bg-amber-500',
+  },
+  looks_good: { label: 'Looks good', text: 'text-green-800 dark:text-green-300', dot: 'bg-green-500' },
+};
+
+// The verdict word in its colour, then the model's summary (plain text) under a small label.
+function VerdictBlock({ verdict, summary }: { verdict: Verdict; summary: string | null }) {
+  const v = VERDICTS[verdict];
+  return (
+    <div className="space-y-1.5">
+      <p className={`flex items-center gap-2 text-base font-semibold ${v.text}`}>
+        <span aria-hidden className={`h-2.5 w-2.5 shrink-0 rounded-full ${v.dot}`} />
+        <span>
+          <span className="sr-only">Verdict: </span>
+          {v.label}
+        </span>
+      </p>
+      {summary && (
+        <div className="max-w-3xl">
+          <p className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted)]">AI summary</p>
+          <p className="break-words text-sm leading-relaxed">{summary}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // A failed review keeps the rule findings the static step saved; say so, so they are not
 // mistaken for a finished review.
 function KeptFindingsNote({ review }: { review: Review }) {
@@ -139,8 +188,8 @@ function KeptFindingsNote({ review }: { review: Review }) {
 }
 
 // What sits above the code and the findings: a note before the first review, the error when
-// it failed, then one box with the summary row (when it is done) over the folded 'Review
-// details' line (which is also the progress while a review runs).
+// it failed, then one box with the verdict and the AI summary, the summary row (when it is done)
+// and the 'Review details' line (which is also the progress while a review runs).
 export function ReviewPanel({
   review,
   language,
@@ -158,6 +207,7 @@ export function ReviewPanel({
   starting: boolean;
   onRetry: () => void;
 }) {
+  const verdict = review ? reviewVerdict(review) : null;
   return (
     <div className="space-y-3" aria-live="polite">
       {startError && <ErrorBanner title="Could not start the review" message={startError} onRetry={onRetry} />}
@@ -181,6 +231,11 @@ export function ReviewPanel({
       {review?.status === 'failed' && !starting && <KeptFindingsNote review={review} />}
       {review && (review.status === 'done' || hasSteps(review)) && (
         <div className="space-y-2 rounded-md border border-[var(--border)] bg-[var(--surface)] px-4 py-2.5">
+          {verdict && (
+            <div className="border-b border-[var(--border)] pb-2.5 pt-1">
+              <VerdictBlock verdict={verdict} summary={review.summary ?? null} />
+            </div>
+          )}
           {review.status === 'done' && <Summary review={review} />}
           {hasSteps(review) && (
             <div className={review.status === 'done' ? 'border-t border-[var(--border)] pt-2' : ''}>

@@ -2,7 +2,11 @@
 
 import { useId, useState } from "react";
 import type { ReactNode } from "react";
-import { CONTEXT_LABELS, ContextTag } from "@/components/shared";
+import {
+  CONTEXT_LABELS,
+  ContextTag,
+  LANGUAGE_LABELS,
+} from "@/components/shared";
 import { REVIEW_STEPS, STATIC_LANGUAGES } from "@/lib/types";
 import type { CodeContext, Language, Review, ReviewStep } from "@/lib/types";
 import { StepEvents, useReviewEvents } from "./ReviewEvents";
@@ -139,16 +143,32 @@ const STATE_WORDS: Record<StepState, string> = {
   skipped: "not run",
 };
 
+// What the static step says for a language with no analyzer: the language-agnostic rules
+// (any/hardcoded-secret) still ran, so 'no static rules' would be false.
+export function noAnalyzerStaticText(language: Language): string {
+  const which =
+    language === "other"
+      ? "no rules for this language"
+      : `no ${LANGUAGE_LABELS[language]} rules yet`;
+  return `Only the language-agnostic rules ran (hard-coded secrets); ${which}`;
+}
+
+// 'Go' / 'Python', or 'this language' for Other, so the sentence never reads 'for Other'.
+function languagePhrase(language: Language): string {
+  return language === "other" ? "this language" : LANGUAGE_LABELS[language];
+}
+
 // What each step found, in a few words.
 function stepDetail(
   step: ReviewStep,
   state: StepState,
   review: Review,
   staticRules: boolean,
+  language: Language,
 ): string | null {
   const findings = review.findings ?? [];
   if (step === "static") {
-    if (!staticRules) return "No static rules for this language yet";
+    if (!staticRules) return noAnalyzerStaticText(language);
     if (state === "running") return "Parsing the code and running the rules";
     if (review.analysisError)
       return `Static analysis stopped: ${review.analysisError}; the model reviewed the code alone`;
@@ -243,7 +263,7 @@ function StepList({
     <ol aria-label="Review steps" className="space-y-1.5">
       {REVIEW_STEPS.map((step) => {
         const state = states[step];
-        const detail = stepDetail(step, state, review, staticRules);
+        const detail = stepDetail(step, state, review, staticRules, language);
         const ms = timings[step];
         const expandable = canOpen(state);
         const isOpen = expandable && openSteps.has(step);
@@ -323,18 +343,27 @@ const LEGACY_USER_SIGNAL = "set by the user";
 // detection saw (the review's contextSignals), or the detected signals alone.
 function ContextLine({
   review,
+  language,
   snippetContext,
 }: {
   review: Review;
+  language: Language;
   snippetContext: CodeContext | null;
 }) {
   if (!review.context) return null;
+  // No analyzer, so nothing was detected: the context is 'unknown' or the user's choice.
+  const noDetection = review.staticSupported === false;
   const signals = (review.contextSignals ?? []).filter(
     (s) => s !== LEGACY_USER_SIGNAL,
   );
   const byUser = snippetContext !== null;
   let why: string;
-  if (byUser)
+  const languageName = languagePhrase(language);
+  if (noDetection)
+    why = byUser
+      ? `set by you (no context detection for ${languageName})`
+      : `No context detection for ${languageName}`;
+  else if (byUser)
     why = signals.length
       ? `set by you (detected: ${signals.join(" · ")})`
       : "set by you";
@@ -432,7 +461,7 @@ function DetailsSummary({
     const ms = timings[step];
     if (state === "waiting") continue;
     if (state === "running") {
-      const detail = stepDetail(step, state, review, staticRules);
+      const detail = stepDetail(step, state, review, staticRules, language);
       parts.push(
         <>
           <Spinner className="h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
@@ -526,7 +555,11 @@ export function ReviewSteps({
         className="mt-2 space-y-2.5 border-t border-[var(--border)] pt-2.5"
       >
         <StepList review={review} language={language} />
-        <ContextLine review={review} snippetContext={snippetContext} />
+        <ContextLine
+          review={review}
+          language={language}
+          snippetContext={snippetContext}
+        />
         {showUsage && (
           <p className="text-xs tabular-nums text-[var(--muted)]">
             <span className="font-medium text-[var(--foreground)]">Usage</span>{" "}
