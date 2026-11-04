@@ -87,6 +87,8 @@ export default function SnippetPage() {
       ) : null}
       <ReviewPanel
         review={review}
+        language={snippet.language}
+        snippetContext={snippet.context ?? null}
         startError={state.startError}
         pollError={state.pollError}
         starting={state.starting}
@@ -95,7 +97,10 @@ export default function SnippetPage() {
       <CodeView
         code={snippet.code}
         language={snippet.language}
-        findings={review?.status === 'done' ? (review.findings ?? []) : []}
+        // Rule findings are saved when the static step ends, so they show while the model
+        // runs, and they stay when a later step fails.
+        findings={review?.findings ?? []}
+        reviewActive={state.active}
         pendingFindings={state.pendingFindings}
         findingErrors={state.findingErrors}
         onSetFindingStatus={state.updateFinding}

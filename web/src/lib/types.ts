@@ -42,6 +42,35 @@ export type FindingStatus = (typeof FINDING_STATUSES)[number];
 export const MAX_CODE_CHARS = 20000;
 export const MAX_CODE_LINES = 1000;
 
+// What kind of code a snippet is: detected from the code, or set by the user on create.
+export const CODE_CONTEXTS = ['frontend', 'backend', 'script', 'test', 'query', 'unknown'] as const;
+export type CodeContext = (typeof CODE_CONTEXTS)[number];
+// What POST /snippets accepts for `context`: a context, or 'auto' (detect it; stored as null).
+export type ContextChoice = CodeContext | 'auto';
+
+// Languages that get static rules before the model; every other language is model-only.
+export const STATIC_LANGUAGES: readonly Language[] = ['javascript', 'typescript', 'python', 'sql'];
+
+// Where a review is right now: queued -> static -> model -> checking -> done (or failed at any point).
+export const REVIEW_PHASES = ['queued', 'static', 'model', 'checking', 'done', 'failed'] as const;
+export type ReviewPhase = (typeof REVIEW_PHASES)[number];
+
+// The phases that have a timing and a row in the step list, in order.
+export const REVIEW_STEPS = ['static', 'model', 'checking'] as const;
+export type ReviewStep = (typeof REVIEW_STEPS)[number];
+
+// Who raised a finding: a deterministic rule, or the model.
+export const FINDING_SOURCES = ['rule', 'model'] as const;
+export type FindingSource = (typeof FINDING_SOURCES)[number];
+
+// Result of checking a finding's proposed fix.
+export const FIX_CHECKS = ['not_checked', 'passed', 'failed'] as const;
+export type FixCheck = (typeof FIX_CHECKS)[number];
+
+// Where costUsd came from: the CLI's own total, or token counts priced from LLM_PRICE_* settings.
+export const COST_SOURCES = ['cli', 'price-config'] as const;
+export type CostSource = (typeof COST_SOURCES)[number];
+
 // One item in GET /snippets. The list leaves out `code`.
 export interface Snippet {
   id: number;
@@ -50,6 +79,22 @@ export interface Snippet {
   reviewStatus: SnippetReviewStatus;
   createdAt: string;
   updatedAt: string;
+}
+
+// "Replace lines lineStart..lineEnd (inclusive) with `replacement`" (empty deletes them).
+export interface FixReplacement {
+  lineStart: number;
+  lineEnd: number;
+  replacement: string;
+}
+
+// What the fix checker found. null means the check could not run (no analyzer for the
+// language, or ruleCleared on a model finding).
+export interface FixCheckDetail {
+  parses: boolean | null;
+  ruleCleared: boolean | null;
+  newRuleIds: string[];
+  note: string;
 }
 
 export interface Finding {
@@ -62,6 +107,11 @@ export interface Finding {
   description: string;
   suggestedFix: string | null;
   status: FindingStatus;
+  source: FindingSource;
+  ruleId: string | null; // set for rule findings, e.g. 'js/sql-string-concat'
+  fix: FixReplacement | null;
+  fixCheck: FixCheck;
+  fixCheckDetail: FixCheckDetail | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -74,6 +124,19 @@ export interface Review {
   error: string | null;
   provider: string;
   rejectedCount: number;
+  phase: ReviewPhase;
+  phaseTimings: Partial<Record<ReviewStep, number>>; // ms per finished step
+  context: CodeContext | null; // the context the review used: the user's, else the detected one
+  contextSignals: string[]; // why that context, in plain words ('imports express')
+  staticSupported: boolean | null; // false: no static rules for this language; null until the static step ran
+  duplicateCount: number; // model findings dropped because a rule already reported them
+  model: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheReadTokens: number | null;
+  cacheWriteTokens: number | null;
+  costUsd: number | null; // null when no price is known; never estimated by the frontend
+  costSource: CostSource | null;
   startedAt: string | null;
   completedAt: string | null;
   createdAt: string;
@@ -84,6 +147,7 @@ export interface Review {
 // GET /snippets/:id: the snippet with its code and its most recent review (null if never reviewed).
 export interface SnippetDetail extends Snippet {
   code: string;
+  context: CodeContext | null; // set by the user on create; null means detect automatically
   latestReview: Review | null;
 }
 
@@ -107,6 +171,7 @@ export interface CreateSnippetInput {
   title: string;
   language: Language;
   code: string;
+  context?: ContextChoice; // omitted or 'auto' = detect from the code
 }
 
 // The `data` of a 400 validation error: field name -> messages.
