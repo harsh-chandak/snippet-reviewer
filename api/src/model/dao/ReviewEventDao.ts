@@ -19,13 +19,16 @@ class ReviewEventDao {
     });
   }
 
-  async stats(reviewId: number, transaction: Transaction) {
-    const [row] = await db.query<{ total: number; truncated: number }>(
-      `SELECT count(*)::int AS total, count(*) FILTER (WHERE type = 'events.truncated')::int AS truncated
+  // How many per-item rows the log holds (every type not in `notCounted`), and whether it has said
+  // it dropped something. Read inside the caller's locked transaction.
+  async stats(reviewId: number, transaction: Transaction, notCounted: readonly ReviewEventType[] = []) {
+    const [row] = await db.query<{ perItem: number; truncated: number }>(
+      `SELECT count(*) FILTER (WHERE NOT (type = ANY(ARRAY[:notCounted]::varchar[])))::int AS "perItem",
+              count(*) FILTER (WHERE type = 'events.truncated')::int AS truncated
          FROM review_events WHERE "reviewId" = :reviewId`,
-      { replacements: { reviewId }, type: QueryTypes.SELECT, transaction },
+      { replacements: { reviewId, notCounted: notCounted.length ? [...notCounted] : [''] }, type: QueryTypes.SELECT, transaction },
     );
-    return { total: row.total, truncated: row.truncated > 0 };
+    return { perItem: row.perItem, truncated: row.truncated > 0 };
   }
 
   async insert(reviewId: number, events: NewReviewEvent[], transaction: Transaction) {

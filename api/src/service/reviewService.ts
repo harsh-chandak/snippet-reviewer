@@ -9,7 +9,7 @@ import { llmService, LlmUsage } from './llmService';
 import { LlmError } from './llm/types';
 import { analyzeSnippet } from './analysis';
 import { checkFix } from './analysis/fixCheck';
-import { FixReplacement } from './analysis/types';
+import { AnalysisResult, FixReplacement, RuleFinding } from './analysis/types';
 import { HttpError } from '../utils/httpError';
 import { CodeContext, FindingSource, Language, ReviewPhase } from '../model/constants';
 import { toUserMessage } from '../utils/userMessage';
@@ -26,9 +26,6 @@ interface SnippetForRun {
   code: string;
   context: CodeContext | null; // the user's choice; null means detect it
 }
-
-// The signal stored when the user set the context and it differs from what detection found.
-const USER_SET_SIGNAL = 'set by the user';
 
 const INTERRUPTED_MESSAGE = 'The server restarted before this review finished. Run it again.';
 
@@ -47,6 +44,52 @@ function fixCheckedEvent(findingId: number, source: FindingSource, ruleId: strin
     ruleCleared: checked.fixCheckDetail?.ruleCleared ?? null,
     newRuleIds: checked.fixCheckDetail?.newRuleIds ?? [],
   });
+}
+
+// Token counts are stored in int4 columns: a count past that (a broken or hostile CLI) is clamped
+// before it is saved or logged, so it can't fail a review the model already answered (PIPE-4).
+const MAX_TOKEN_COUNT = 2147483647;
+
+function clampUsage(usage: LlmUsage | null): LlmUsage | null {
+  if (!usage) return null;
+  const clamp = (n: number) => Math.min(n, MAX_TOKEN_COUNT);
+  return {
+    ...usage,
+    inputTokens: clamp(usage.inputTokens),
+    outputTokens: clamp(usage.outputTokens),
+    cacheReadTokens: clamp(usage.cacheReadTokens),
+    cacheWriteTokens: clamp(usage.cacheWriteTokens),
+  };
+}
+
+// The phases a step list shows; a failure in one of them is recorded as phaseTimings.failedPhase.
+type StepPhase = NonNullable<PhaseTimings['failedPhase']>;
+const STEP_PHASES: readonly StepPhase[] = ['static', 'model', 'checking'];
+const isStepPhase = (phase: ReviewPhase): phase is StepPhase => (STEP_PHASES as readonly string[]).includes(phase);
+
+// The timings to save on a failed review, with the phase it failed in (the decision 'failed step
+// on the page'), so the page doesn't have to infer it from which timings are missing.
+function failedTimings(timings: PhaseTimings, phase: ReviewPhase): PhaseTimings {
+  return isStepPhase(phase) ? { ...timings, failedPhase: phase } : { ...timings };
+}
+
+// The same rule hit, found by both runs of the analyzer.
+const ruleKey = (f: RuleFinding) => `${f.ruleId}:${f.lineStart}`;
+
+// The static step. A user-set context can add rules, never remove them (the decision 'user context
+// and rules'): when it differs from the detected one, the rules run for both contexts and the
+// findings are merged, one per (ruleId, lineStart), in line order. The result's context is the
+// user's choice; its detected signals are what detection saw.
+async function analyzeForReview(language: Language, code: string, userContext: CodeContext | null): Promise<AnalysisResult> {
+  const chosen = await analyzeSnippet(language, code, userContext ?? undefined);
+  if (!userContext || userContext === chosen.detected.context) return chosen;
+  const detected = await analyzeSnippet(language, code);
+  const seen = new Set(chosen.findings.map(ruleKey));
+  const findings = [...chosen.findings, ...detected.findings.filter((f) => !seen.has(ruleKey(f)))]
+    .map((f, i) => ({ f, i }))
+    .sort((a, b) => a.f.lineStart - b.f.lineStart || a.i - b.i)
+    .map(({ f }) => f);
+  return { ...chosen, findings, durationMs: chosen.durationMs + detected.durationMs };
 }
 
 function usageColumns(usage: LlmUsage | null): ReviewUpdate {
@@ -134,12 +177,12 @@ class ReviewService {
       phase = 'static';
 
       let phaseStart = Date.now();
-      const analysis = await analyzeSnippet(language, code, snippet.context ?? undefined);
+      const analysis = await analyzeForReview(language, code, snippet.context);
       timings.static = Date.now() - phaseStart;
       const context = analysis.context;
-      // The why behind the context: the user's choice, or what the detection saw.
-      const signals =
-        snippet.context && snippet.context !== analysis.detected.context ? [USER_SET_SIGNAL] : analysis.detected.signals;
+      // What detection saw, also when the user chose another context: their choice is on the
+      // snippet (snippets.context), so the page can show both.
+      const signals = analysis.detected.signals;
 
       const ruleRows = await db.transaction(async (transaction) => {
         const moved = await reviewDao.updateIfStatus(
@@ -206,7 +249,7 @@ class ReviewService {
         console.warn(`[review ${reviewId}] dropped ${result.rejected.length} finding(s)`, result.rejected);
       }
 
-      const modelResult = result;
+      const modelResult = { ...result, usage: clampUsage(result.usage) };
       await db.transaction(async (transaction) => {
         const toChecking = await reviewDao.updateIfStatus(
           reviewId,
@@ -249,10 +292,23 @@ class ReviewService {
 
       // checking
       phaseStart = Date.now();
-      const check = (source: FindingSource, ruleId: string | null, fix: FixReplacement | null | undefined) =>
-        fix ? this.checkOne(reviewId, { source, ruleId, fix }, code, language, context) : Promise.resolve(undefined);
-      const ruleChecks = await Promise.all(analysis.findings.map((f) => check('rule', f.ruleId, f.fix)));
-      const modelChecks = await Promise.all(modelResult.findings.map((f) => check('model', null, f.fix)));
+      // The finding's own lines go with it, so a model fix that strays from them fails (model fix locality).
+      const check = (
+        source: FindingSource,
+        ruleId: string | null,
+        f: { fix?: FixReplacement | null; lineStart: number; lineEnd: number },
+      ) =>
+        f.fix
+          ? this.checkOne(
+              reviewId,
+              { source, ruleId, fix: f.fix, lineStart: f.lineStart, lineEnd: f.lineEnd },
+              code,
+              language,
+              context,
+            )
+          : Promise.resolve(undefined);
+      const ruleChecks = await Promise.all(analysis.findings.map((f) => check('rule', f.ruleId, f)));
+      const modelChecks = await Promise.all(modelResult.findings.map((f) => check('model', null, f)));
       timings.checking = Date.now() - phaseStart;
 
       // done
@@ -295,7 +351,7 @@ class ReviewService {
             modelFindings: modelRows.length,
           }),
         );
-        await events.flush(transaction, { final: true });
+        await events.flush(transaction);
       });
     } catch (err) {
       if (err instanceof SupersededError) {
@@ -311,14 +367,14 @@ class ReviewService {
           const failed = await reviewDao.updateIfStatus(
             reviewId,
             ['pending', 'running'],
-            { status: 'failed', phase: 'failed', phaseTimings: { ...timings }, error: message, completedAt: new Date() },
+            { status: 'failed', phase: 'failed', phaseTimings: failedTimings(timings, phase), error: message, completedAt: new Date() },
             transaction,
           );
           if (!failed) return;
           await snippetDao.setReviewStatusIfLatest(snippetId, reviewId, 'failed', transaction);
           if (modelFailure) events.add(event('model.failed', modelFailure));
           events.add(event('review.failed', { phase, message, ms: Date.now() - runStart }));
-          await events.flush(transaction, { final: true });
+          await events.flush(transaction);
         })
         .catch((saveErr) => console.error(`[review ${reviewId}] could not record failure`, saveErr));
     }
@@ -327,7 +383,7 @@ class ReviewService {
   // A fix checker that throws must not cost the review its findings: that fix is just not checked.
   private async checkOne(
     reviewId: number,
-    finding: { source: FindingSource; ruleId: string | null; fix: FixReplacement },
+    finding: { source: FindingSource; ruleId: string | null; fix: FixReplacement; lineStart: number; lineEnd: number },
     code: string,
     language: Language,
     context: CodeContext,
@@ -359,6 +415,7 @@ class ReviewService {
       );
       await snippetDao.setReviewStatus(active.map((r) => r.snippetId), 'failed', transaction);
       for (const r of active) {
+        await reviewDao.update(r.id, { phaseTimings: failedTimings(r.phaseTimings ?? {}, r.phase) }, transaction);
         const since = (r.startedAt ?? r.createdAt).getTime();
         await reviewEventService.append(
           r.id,

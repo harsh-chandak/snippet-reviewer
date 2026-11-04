@@ -17,6 +17,8 @@ export interface PhaseTimings {
   static?: number;
   model?: number;
   checking?: number;
+  // Set when the review failed: the step it was in.
+  failedPhase?: 'static' | 'model' | 'checking';
 }
 
 export const COST_SOURCES = ['cli', 'price-config'] as const;

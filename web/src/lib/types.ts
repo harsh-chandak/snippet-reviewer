@@ -125,7 +125,7 @@ export interface Review {
   provider: string;
   rejectedCount: number;
   phase: ReviewPhase;
-  phaseTimings: Partial<Record<ReviewStep, number>>; // ms per finished step
+  phaseTimings: Partial<Record<ReviewStep, number>> & { failedPhase?: ReviewStep }; // ms per finished step; failedPhase on failure
   context: CodeContext | null; // the context the review used: the user's, else the detected one
   contextSignals: string[]; // why that context, in plain words ('imports express')
   staticSupported: boolean | null; // false: no static rules for this language; null until the static step ran

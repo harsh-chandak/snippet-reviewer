@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
 import { describe, expect, it } from 'vitest';
 import { QueryTypes } from 'sequelize';
-import { api, createSnippet, db, fakeProvider, finding, startReview, useTestDatabase, V1, waitForReview } from './helpers';
+import { api, createSnippet, db, fakeProvider, finding, pollReview, startReview, useTestDatabase, V1, waitForReview } from './helpers';
 import { MAX_EVENTS_PER_REVIEW, REVIEW_EVENT_TYPES } from '../src/model/constants';
 import { CONTEXT_FOCUS, REVIEW_SYSTEM_PROMPT } from '../src/service/llm/prompt';
 import { reviewJsonSchema } from '../src/service/llm/reviewSchema';
@@ -307,7 +307,10 @@ describe('event size limits', () => {
       expect(ofType(events, type), type).toHaveLength(1);
     }
     expect(rejected.length + 4 + 1).toBe(MAX_EVENTS_PER_REVIEW);
-    expect(events.at(-1)!.type).toBe('events.truncated');
+    // The truncated event is written by the step that dropped something, so it follows the last
+    // rejected suggestion; review.done comes after it and is still kept.
+    expect(types(events).indexOf('events.truncated')).toBe(types(events).lastIndexOf('model.finding_rejected') + 1);
+    expect(events.at(-1)!.type).toBe('review.done');
 
     // Later events past the limit are dropped; the log never grows past 500 or gets a second truncated event.
     const late = event('finding.resolved', { findingId: 1, reviewId: review.id, from: 'open', to: 'accepted' });
@@ -359,6 +362,81 @@ describe('event size limits', () => {
   });
 });
 
+// 600 lines of `eval(x);`: 600 js/eval rule findings, more per-item events than the log holds (the
+// attack's flood.js used `a == b;`; js/eval has no fix, so the checking phase stays quick).
+const FLOOD = ['let x;', ...Array.from({ length: 600 }, () => 'eval(x);')].join('\n');
+const PER_ITEM_ROOM = MAX_EVENTS_PER_REVIEW - 5;
+const LIFECYCLE_TYPES = ['review.started', 'static.parsed', 'model.called', 'model.failed', 'review.done', 'review.failed', 'events.truncated'];
+
+describe('event cap and lifecycle events', () => {
+  it('PIPE-1: user labels while the model runs never push out model.called, review.done or events.truncated', async () => {
+    const snippet = await createSnippet({ code: FLOOD });
+    fakeProvider.respondWith({ findings: [] }, { delayMs: 1500 });
+    const started = await startReview(snippet.id);
+    const during = await pollReview(started.id, (r) => r.phase === 'model');
+    const rules = during.findings.filter((f: any) => f.source === 'rule');
+    expect(rules).toHaveLength(600);
+    for (const f of rules.slice(0, 3)) {
+      expect((await api().patch(`${V1}/findings/${f.id}`).send({ status: 'dismissed' })).status).toBe(200);
+    }
+    const review = await waitForReview(started.id);
+    expect(review.status).toBe('done');
+
+    const events = await eventsOf(review.id);
+    for (const type of ['review.started', 'static.parsed', 'model.called', 'review.done']) {
+      expect(ofType(events, type), type).toHaveLength(1);
+    }
+    expect(ofType(events, 'events.truncated').length).toBeGreaterThanOrEqual(1);
+    const perItem = events.filter((e) => !LIFECYCLE_TYPES.includes(e.type));
+    expect(perItem.length).toBeLessThanOrEqual(PER_ITEM_ROOM);
+    expect(events.length).toBeLessThanOrEqual(MAX_EVENTS_PER_REVIEW);
+  });
+
+  it('PIPE-6: the step that drops events writes events.truncated with it, so a restart mid-review keeps the count', async () => {
+    const snippet = await createSnippet({ code: FLOOD });
+    fakeProvider.respondWith({ findings: [] }, { delayMs: 1000 });
+    const started = await startReview(snippet.id);
+    await pollReview(started.id, (r) => r.phase === 'model');
+
+    // The model is still answering: what is in the table now is what a restart would leave.
+    const events = await eventsOf(started.id);
+    expect(ofType(events, 'static.rule_hit')).toHaveLength(PER_ITEM_ROOM);
+    expect(ofType(events, 'events.truncated').map((e) => e.payload)).toEqual([{ dropped: 600 - PER_ITEM_ROOM }]);
+    await waitForReview(started.id);
+  });
+
+  it('the cap is checked against the rows in the table: lifecycle events go in even when per-item room is gone', async () => {
+    const { review } = await runReview(PLAIN, []);
+    const batch = Array.from({ length: 600 }, (_, i) =>
+      event('finding.resolved', { findingId: i, reviewId: review.id, from: 'open', to: 'accepted' }),
+    );
+    await db.transaction((t) => reviewEventService.append(review.id, batch, t));
+    await db.transaction((t) =>
+      reviewEventService.append(review.id, [event('review.failed', { phase: 'model', message: 'late', ms: 1 })], t),
+    );
+    const events = await eventsOf(review.id);
+    expect(ofType(events, 'finding.resolved')).toHaveLength(PER_ITEM_ROOM);
+    expect(events.at(-1)!.type).toBe('review.failed');
+  });
+});
+
+describe('token counts out of range', () => {
+  it('PIPE-4: a count above the int4 range is clamped, so the review is done and the model call logged', async () => {
+    const { review } = await runReview(PLAIN, [], { ...USAGE, inputTokens: 3_000_000_000, outputTokens: 5_000_000_000 });
+    expect(review.status).toBe('done');
+    expect(review).toMatchObject({ inputTokens: 2147483647, outputTokens: 2147483647, costUsd: 0.0089 });
+    const [called] = ofType(await eventsOf(review.id), 'model.called');
+    expect(called.payload).toMatchObject({ inputTokens: 2147483647, outputTokens: 2147483647, totalInputTokens: 2147483647 + 1948 });
+  });
+
+  it('PIPE-7: v_review_costs reads a review whose total input passes 2^31', async () => {
+    const { review } = await runReview(PLAIN, [], { ...USAGE, inputTokens: 2_000_000_000, cacheReadTokens: 2_000_000_000 });
+    expect(review.status).toBe('done');
+    const rows = await db.query<{ totalInputTokens: string }>('SELECT * FROM v_review_costs', { type: QueryTypes.SELECT });
+    expect(rows.map((r) => String(r.totalInputTokens))).toEqual(['4000001948']);
+  });
+});
+
 describe('reviews interrupted by a restart', () => {
   it('logs review.failed with the phase the review was in', async () => {
     const snippet = await createSnippet();
@@ -378,6 +456,8 @@ describe('reviews interrupted by a restart', () => {
       ms: expect.any(Number),
     });
     expect(events[0].payload.ms).toBeGreaterThanOrEqual(4000);
+    const review = (await api().get(`${V1}/reviews/${id}`)).body.data;
+    expect(review.phaseTimings).toEqual({ failedPhase: 'model' });
   });
 });
 
@@ -397,7 +477,7 @@ describe('analytics views over real reviews', () => {
         context: 'unknown',
         model: 'claude-test',
         promptVersion: PROMPT_VERSION,
-        totalInputTokens: 1950,
+        totalInputTokens: '1950',
         outputTokens: 407,
         cacheReadTokens: 0,
         costUsd: 0.0089,

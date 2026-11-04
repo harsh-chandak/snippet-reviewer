@@ -95,31 +95,57 @@ export function totalInputTokens(usage: { inputTokens: number; cacheReadTokens: 
   return usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
 }
 
+// Lifecycle events say what happened to the review as a whole. The 500-event cap never drops them
+// and doesn't count them (the decision 'event cap and lifecycle events'): it counts only the per-item
+// events (rule hits, kept, rejected and duplicate suggestions, fix checks, finding.resolved).
+export const LIFECYCLE_EVENTS: readonly EventType[] = [
+  'review.started',
+  'static.parsed',
+  'model.called',
+  'model.failed',
+  'review.done',
+  'review.failed',
+  'events.truncated',
+];
+const LIFECYCLE: ReadonlySet<EventType> = new Set(LIFECYCLE_EVENTS);
+
+// Per-item rows a log may hold: the cap less the five slots one run's lifecycle events need
+// (review.started, static.parsed, model.called or model.failed, review.done or review.failed, and an
+// events.truncated), so a normal run's log stays within MAX_EVENTS_PER_REVIEW rows.
+export const MAX_PER_ITEM_EVENTS = MAX_EVENTS_PER_REVIEW - 5;
+
 class ReviewEventService {
   // Appends events to a review's log inside the caller's transaction, so an event is saved exactly
-  // when the step it describes is. The log holds at most MAX_EVENTS_PER_REVIEW rows: the events
-  // that don't fit are dropped and, the first time that happens, the last free row says how many.
-  // `dropped` counts events the caller already dropped (see ReviewEventBuffer); they go in that
-  // same truncated event. Returns how many of these events were dropped here.
-  async append(reviewId: number, events: ReviewEventInput[], transaction: Transaction, dropped = 0): Promise<number> {
-    if (!events.length && !dropped) return 0;
+  // when the step it describes is. Lifecycle events always go in. Per-item events go in while the
+  // log holds fewer than MAX_PER_ITEM_EVENTS of them, counted from the rows in the table (under a
+  // lock, so concurrent writers, say the pipeline and a user labelling findings, share one count).
+  // The ones that don't fit are dropped, and this same write adds an events.truncated saying how
+  // many, so the count is in the table as soon as anything is dropped, whatever happens after.
+  // One exception keeps a full log from growing: user labels (finding.resolved) dropped from a log
+  // that has already said it was truncated are dropped without another events.truncated.
+  // Returns how many of these events were dropped.
+  async append(reviewId: number, events: ReviewEventInput[], transaction: Transaction): Promise<number> {
+    if (!events.length) return 0;
     await reviewEventDao.lockReview(reviewId, transaction);
-    const stats = await reviewEventDao.stats(reviewId, transaction);
-    const rows: NewReviewEvent[] = events.map((e) => ({ type: e.type, payload: clean(e.payload) as Record<string, unknown> }));
-
-    const room = MAX_EVENTS_PER_REVIEW - stats.total;
-    if (rows.length <= room && !dropped) {
-      await reviewEventDao.insert(reviewId, rows, transaction);
-      return 0;
+    const stats = await reviewEventDao.stats(reviewId, transaction, LIFECYCLE_EVENTS);
+    let room = MAX_PER_ITEM_EVENTS - stats.perItem;
+    const rows: NewReviewEvent[] = [];
+    let dropped = 0;
+    let droppedOnlyLabels = true;
+    for (const e of events) {
+      if (LIFECYCLE.has(e.type) || room > 0) {
+        if (!LIFECYCLE.has(e.type)) room--;
+        rows.push({ type: e.type, payload: clean(e.payload) as Record<string, unknown> });
+      } else {
+        dropped++;
+        if (e.type !== 'finding.resolved') droppedOnlyLabels = false;
+      }
     }
-    // Something is dropped. Once the log has said so, later events are dropped without a word:
-    // rows are never updated, so that count can't grow.
-    if (stats.truncated || room <= 0) return rows.length;
-    const kept = rows.slice(0, Math.min(rows.length, room - 1));
-    const droppedHere = rows.length - kept.length;
-    kept.push({ type: 'events.truncated', payload: { dropped: droppedHere + dropped } });
-    await reviewEventDao.insert(reviewId, kept, transaction);
-    return droppedHere;
+    if (dropped && !(stats.truncated && droppedOnlyLabels)) {
+      rows.push({ type: 'events.truncated', payload: { dropped } });
+    }
+    await reviewEventDao.insert(reviewId, rows, transaction);
+    return dropped;
   }
 
   async listForReview(reviewId: number) {
@@ -132,51 +158,22 @@ class ReviewEventService {
 
 export const reviewEventService = new ReviewEventService();
 
-// The lifecycle events of one run (static.parsed, model.called or model.failed, review.done or
-// review.failed) plus review.started and an events.truncated: room kept for them whatever the
-// model sends, so a flood of rejected suggestions can't push out the events that say what happened.
-const RESERVED_FOR_LIFECYCLE = 5;
-const LIFECYCLE: ReadonlySet<EventType> = new Set<EventType>([
-  'review.started',
-  'static.parsed',
-  'model.called',
-  'model.failed',
-  'review.done',
-  'review.failed',
-]);
-
-// The events of one review run, written step by step. Per-item events (rule hits, kept, rejected,
-// duplicate, fix checks) share a budget that leaves room for the lifecycle events; the ones over
-// it are counted and reported in one events.truncated event when the run ends (done or failed).
+// The events of one review run, collected for the transaction that saves the step they describe
+// and written with it. The cap is applied by append, against the rows already in the table.
 export class ReviewEventBuffer {
   private pending: ReviewEventInput[] = [];
-  private detailWritten = 0;
-  private dropped = 0;
 
-  constructor(private reviewId: number, private detailBudget = MAX_EVENTS_PER_REVIEW - RESERVED_FOR_LIFECYCLE) {}
+  constructor(private reviewId: number) {}
 
   add(...events: ReviewEventInput[]) {
-    for (const e of events) {
-      if (LIFECYCLE.has(e.type)) {
-        this.pending.push(e);
-      } else if (this.detailWritten < this.detailBudget) {
-        this.detailWritten++;
-        this.pending.push(e);
-      } else {
-        this.dropped++;
-      }
-    }
+    this.pending.push(...events);
   }
 
-  // Writes what was added since the last flush. `final` on the run's last transaction, which also
-  // records how many events the budget dropped.
-  async flush(transaction: Transaction, { final = false } = {}) {
+  // Writes what was added since the last flush.
+  async flush(transaction: Transaction) {
     const events = this.pending;
     this.pending = [];
-    const dropped = final ? this.dropped : 0;
-    if (final) this.dropped = 0;
-    // Anything the size limit drops here is reported by append itself, in the log's one events.truncated.
-    await reviewEventService.append(this.reviewId, events, transaction, dropped);
+    await reviewEventService.append(this.reviewId, events, transaction);
   }
 
   // Forgets unwritten events, when the transaction they were meant for did not commit.

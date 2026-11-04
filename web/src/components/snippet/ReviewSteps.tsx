@@ -38,9 +38,18 @@ export function hasSteps(review: Review): boolean {
   return Object.keys(review.phaseTimings ?? {}).length > 0 || review.staticSupported !== null;
 }
 
-// Each step's state, from the phase and the timings. A failed review's phase is 'failed',
-// so the step that failed is the first one without a timing (each step records its timing
-// when it ends); the ones after it never ran.
+// The step a failed review failed in, as the API recorded it (phaseTimings.failedPhase), or null
+// for a review that failed before the API recorded it.
+function recordedFailedStep(review: Review): ReviewStep | null {
+  const value = ((review.phaseTimings ?? {}) as Record<string, unknown>).failedPhase;
+  return (REVIEW_STEPS as readonly unknown[]).includes(value) ? (value as ReviewStep) : null;
+}
+
+// Each step's state, from the phase and the timings. A failed review's phase is 'failed'; the
+// step that failed is the one the API recorded in phaseTimings.failedPhase, the ones before it
+// are done and the ones after it never ran. (A model timeout keeps its model timing, so missing
+// timings can't tell which step failed.) Reviews that failed before failedPhase was recorded
+// fall back to the first step without a timing.
 export function stepStates(review: Review): Record<ReviewStep, StepState> {
   const timings = review.phaseTimings ?? {};
   const states = {} as Record<ReviewStep, StepState>;
@@ -49,9 +58,13 @@ export function stepStates(review: Review): Record<ReviewStep, StepState> {
     return states;
   }
   if (review.status === 'failed') {
-    const at = (REVIEW_STEPS as readonly string[]).includes(review.phase)
-      ? REVIEW_STEPS.indexOf(review.phase as ReviewStep)
-      : REVIEW_STEPS.findIndex((step) => timings[step] === undefined);
+    const recorded = recordedFailedStep(review);
+    const at =
+      recorded !== null
+        ? REVIEW_STEPS.indexOf(recorded)
+        : (REVIEW_STEPS as readonly string[]).includes(review.phase)
+          ? REVIEW_STEPS.indexOf(review.phase as ReviewStep)
+          : REVIEW_STEPS.findIndex((step) => timings[step] === undefined);
     REVIEW_STEPS.forEach((step, i) => {
       states[step] = at === -1 || i < at ? 'done' : i === at ? 'failed' : 'skipped';
     });
@@ -209,13 +222,17 @@ function StepList({ review, language }: { review: Review; language: Language }) 
   );
 }
 
-// Which context the review used, and why: the user's choice, or the signals detection saw.
+// Older reviews stored this in place of the detected signals when the user chose the context.
+const LEGACY_USER_SIGNAL = 'set by the user';
+
+// Which context the review used, and why: the user's choice (kept on the snippet) next to what
+// detection saw (the review's contextSignals), or the detected signals alone.
 function ContextLine({ review, snippetContext }: { review: Review; snippetContext: CodeContext | null }) {
   if (!review.context) return null;
-  const signals = review.contextSignals ?? [];
+  const signals = (review.contextSignals ?? []).filter((s) => s !== LEGACY_USER_SIGNAL);
   const byUser = snippetContext !== null;
   let why: string;
-  if (byUser) why = signals.length ? `set by you; detection saw ${signals.join(' · ')}` : 'set by you';
+  if (byUser) why = signals.length ? `set by you (detected: ${signals.join(' · ')})` : 'set by you';
   else if (signals.length) why = `detected: ${signals.join(' · ')}`;
   else why = 'nothing in the code pointed to a kind, so only general rules ran';
   return (

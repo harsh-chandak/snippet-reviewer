@@ -3,13 +3,14 @@ import { QueryTypes } from 'sequelize';
 import db from '../src/db/postgres';
 import { migrator } from '../src/db/migrator';
 
-// The test database was built by globalSetup with every migration. This file takes 004 down to 003
-// and 005 down to 004, and up again, on its own database (TEST_DATABASE_NAME), and checks the
+// The test database was built by globalSetup with every migration. This file takes 004 down to 003,
+// 005 down to 004 and 006 down to 005, and up again, on its own database (TEST_DATABASE_NAME), and checks the
 // columns, CHECKs and views each way. It ends with every migration applied, so other files that run
 // after it see the full schema.
 
 const M004 = '004-static-analysis.ts';
 const M005 = '005-review-events.ts';
+const M006 = '006-event-fixes.ts';
 
 const NEW_COLUMNS: Record<string, Record<string, { type: string; nullable: boolean; default: string | null }>> = {
   reviews: {
@@ -105,7 +106,7 @@ afterAll(async () => {
 describe('migration 004-static-analysis', () => {
   it('is applied by the test setup, with the decided columns, defaults and CHECKs', async () => {
     expect(await executed()).toContain(M004);
-    expect((await executed()).at(-1)).toBe(M005);
+    expect((await executed()).at(-1)).toBe(M006);
     await expectSchemaAt004();
   });
 
@@ -178,7 +179,7 @@ describe('migration 004-static-analysis', () => {
     );
 
     await migrator.up();
-    expect((await executed()).at(-1)).toBe(M005);
+    expect((await executed()).at(-1)).toBe(M006);
     await expectSchemaAt004();
 
     const rows = await db.query<{ status: string; phase: string }>('SELECT status, phase FROM reviews ORDER BY id', {
@@ -277,7 +278,7 @@ async function expectSchemaAt005() {
 
 describe('migration 005-review-events', () => {
   it('is applied by the test setup, with the decided table, CHECK, index, version columns and views', async () => {
-    expect((await executed()).at(-1)).toBe(M005);
+    expect(await executed()).toContain(M005);
     await expectSchemaAt005();
   });
 
@@ -315,6 +316,9 @@ describe('migration 005-review-events', () => {
   });
 
   it('answers the first questions from the views', async () => {
+    // 005's own view definitions; 006 redefines two of them (tested below).
+    await migrator.down({ to: M006 });
+    expect((await executed()).at(-1)).toBe(M005);
     await db.query('TRUNCATE TABLE review_events, findings, reviews, snippets RESTART IDENTITY CASCADE');
     await db.query(`INSERT INTO snippets (title, language, code, "createdAt", "updatedAt") VALUES ('t', 'javascript', 'x', now(), now())`);
     await db.query(
@@ -407,7 +411,109 @@ describe('migration 005-review-events', () => {
 
   it('goes up again', async () => {
     await migrator.up();
-    expect((await executed()).at(-1)).toBe(M005);
+    expect((await executed()).at(-1)).toBe(M006);
     await expectSchemaAt005();
+  });
+});
+
+// Inserts a snippet and one review with these token columns and rejectedCount; returns the review id.
+async function insertReview(cols: { inputTokens?: number | null; cacheReadTokens?: number | null; cacheWriteTokens?: number | null; rejectedCount?: number }) {
+  const [{ id: snippetId }] = await db.query<{ id: number }>(
+    `INSERT INTO snippets (title, language, code, "createdAt", "updatedAt") VALUES ('t', 'javascript', 'x', now(), now()) RETURNING id`,
+    { type: QueryTypes.SELECT },
+  );
+  const [{ id }] = await db.query<{ id: number }>(
+    `INSERT INTO reviews ("snippetId", provider, status, phase, "inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens",
+                          "rejectedCount", "createdAt", "updatedAt")
+     VALUES (:snippetId, 'fake', 'done', 'done', :inputTokens, 1, :cacheReadTokens, :cacheWriteTokens, :rejectedCount, now(), now())
+     RETURNING id`,
+    {
+      replacements: {
+        snippetId,
+        inputTokens: cols.inputTokens ?? null,
+        cacheReadTokens: cols.cacheReadTokens ?? null,
+        cacheWriteTokens: cols.cacheWriteTokens ?? null,
+        rejectedCount: cols.rejectedCount ?? 0,
+      },
+      type: QueryTypes.SELECT,
+    },
+  );
+  return id;
+}
+
+async function insertRejections(reviewId: number, reasons: string[]) {
+  for (const reason of reasons) {
+    await db.query(`INSERT INTO review_events ("reviewId", type, payload) VALUES (:reviewId, 'model.finding_rejected', :payload::jsonb)`, {
+      replacements: { reviewId, payload: JSON.stringify({ reason, raw: '{}' }) },
+    });
+  }
+}
+
+const select = (sql: string) => db.query<Record<string, any>>(sql, { type: QueryTypes.SELECT });
+
+describe('migration 006-event-fixes', () => {
+  it('is applied by the test setup', async () => {
+    expect((await executed()).at(-1)).toBe(M006);
+  });
+
+  it('PIPE-7: v_review_costs sums tokens as bigint, so one review past 2^31 does not break the view', async () => {
+    await db.query('TRUNCATE TABLE review_events, findings, reviews, snippets RESTART IDENTITY CASCADE');
+    await insertReview({ inputTokens: 2_000_000_000, cacheReadTokens: 2_000_000_000, cacheWriteTokens: 40 });
+    await insertReview({ inputTokens: 2, cacheReadTokens: null, cacheWriteTokens: 1948 });
+    const rows = await select('SELECT "reviewId", "totalInputTokens", pg_typeof("totalInputTokens")::text AS t FROM v_review_costs ORDER BY "reviewId"');
+    expect(rows).toEqual([
+      { reviewId: 1, totalInputTokens: '4000000040', t: 'bigint' },
+      { reviewId: 2, totalInputTokens: '1950', t: 'bigint' },
+    ]);
+  });
+
+  it('PIPE-5: v_model_rejections groups a reason with its numbers replaced by N', async () => {
+    await db.query('TRUNCATE TABLE review_events, findings, reviews, snippets RESTART IDENTITY CASCADE');
+    const id = await insertReview({ rejectedCount: 7 });
+    await insertRejections(id, [
+      ...[3, 4, 5, 6, 7, 8].map((n) => `line ${n} is past the end (2 lines)`),
+      '"severity" must be one of [critical, warning, info]',
+    ]);
+    expect(await select('SELECT * FROM v_model_rejections')).toEqual([
+      { reason: 'line N is past the end (N lines)', count: 6 },
+      { reason: '"severity" must be one of [critical, warning, info]', count: 1 },
+    ]);
+  });
+
+  it('PIPE-8: a truncated log counts from reviews.rejectedCount, spread over the reasons it did log', async () => {
+    await db.query('TRUNCATE TABLE review_events, findings, reviews, snippets RESTART IDENTITY CASCADE');
+    const flooded = await insertReview({ rejectedCount: 600 });
+    await insertRejections(flooded, Array.from({ length: 493 }, () => '"severity" must be one of [critical, warning, info]'));
+    await db.query(`INSERT INTO review_events ("reviewId", type, payload) VALUES (:id, 'events.truncated', '{"dropped": 107}')`, {
+      replacements: { id: flooded },
+    });
+    // Fully logged: counted from its events. Not truncated, so rejectedCount is not used.
+    const other = await insertReview({ rejectedCount: 1 });
+    await insertRejections(other, ['"severity" must be one of [critical, warning, info]']);
+    // Truncated before any rejection was logged: the reasons are unknown, the count is not.
+    const blind = await insertReview({ rejectedCount: 5 });
+    await db.query(`INSERT INTO review_events ("reviewId", type, payload) VALUES (:id, 'events.truncated', '{"dropped": 300}')`, {
+      replacements: { id: blind },
+    });
+    expect(await select('SELECT * FROM v_model_rejections')).toEqual([
+      { reason: '"severity" must be one of [critical, warning, info]', count: 601 },
+      { reason: 'not logged (event log truncated)', count: 5 },
+    ]);
+  });
+
+  it('goes down to 005, restoring 005\'s view definitions', async () => {
+    await migrator.down({ to: M006 });
+    expect((await executed()).at(-1)).toBe(M005);
+    const [{ t }] = await select('SELECT pg_typeof("totalInputTokens")::text AS t FROM v_review_costs LIMIT 1');
+    expect(t).toBe('integer');
+    const reasons = (await select('SELECT reason FROM v_model_rejections')).map((r) => r.reason);
+    expect(reasons).toEqual(['"severity" must be one of [critical, warning, info]']);
+    expect(reasons).not.toContain('not logged (event log truncated)');
+  });
+
+  it('goes up again', async () => {
+    await migrator.up();
+    expect((await executed()).at(-1)).toBe(M006);
+    expect((await select('SELECT * FROM v_model_rejections')).map((r) => r.count)).toEqual([601, 5]);
   });
 });

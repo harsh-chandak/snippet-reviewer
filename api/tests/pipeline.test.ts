@@ -175,7 +175,8 @@ describe('model phase', () => {
     const review = await waitForReview((await startReview(snippet.id)).id);
 
     expect(review).toMatchObject({ status: 'failed', phase: 'failed', error: 'The review timed out after 120s' });
-    expect(review.phaseTimings).toEqual({ static: expect.any(Number), model: expect.any(Number) });
+    // PIPE-3: the row says which phase failed, so the page doesn't infer it from missing timings.
+    expect(review.phaseTimings).toEqual({ static: expect.any(Number), model: expect.any(Number), failedPhase: 'model' });
     expect(review.findings).toEqual([
       expect.objectContaining({ source: 'rule', ruleId: 'js/loose-equality', fixCheck: 'not_checked' }),
     ]);
@@ -234,6 +235,57 @@ describe('model phase', () => {
 });
 
 describe('checking phase', () => {
+  it('applies model fix locality in a live review: a fix far from its finding is failed, naming the lines it touches', async () => {
+    // 15 lines; the finding is on line 1, the fix rewrites line 15 only (no overlap).
+    const code = ['function isZero(x) {', '  return x === 0;', ...Array.from({ length: 12 }, (_, i) => `// ${i}`), '}'].join('\n');
+    const snippet = await createSnippet({ code });
+    fakeProvider.respondWith({
+      findings: [
+        finding({
+          lineStart: 1,
+          lineEnd: 1,
+          category: 'style',
+          description: 'far fix',
+          fix: { lineStart: 15, lineEnd: 15, replacement: '};' },
+        }),
+        finding({
+          lineStart: 15,
+          lineEnd: 15,
+          category: 'style',
+          description: 'near fix',
+          fix: { lineStart: 15, lineEnd: 15, replacement: '};' },
+        }),
+      ],
+    });
+
+    const review = await waitForReview((await startReview(snippet.id)).id);
+
+    expect(review.status).toBe('done');
+    const far = byDescription(review, 'far fix');
+    expect(far).toMatchObject({ source: 'model', fixCheck: 'failed' });
+    expect(far.fixCheckDetail.note).toContain('15');
+    expect(byDescription(review, 'near fix')).toMatchObject({ fixCheck: 'passed' });
+  });
+
+  it('fails a model fix that rewrites lines away from its finding (model fix locality)', async () => {
+    const snippet = await createSnippet({ code: LOOSE_EQUALITY });
+    fakeProvider.respondWith({
+      findings: [
+        finding({
+          lineStart: 3,
+          lineEnd: 3,
+          category: 'style',
+          description: 'strays from its line',
+          fix: { lineStart: 1, lineEnd: 1, replacement: 'function isZero(x) {' },
+        }),
+      ],
+    });
+
+    const review = await waitForReview((await startReview(snippet.id)).id);
+
+    expect(byDescription(review, 'strays from its line')).toMatchObject({ source: 'model', fixCheck: 'failed' });
+  });
+
   it('checks every model fix: a fix that does not parse or adds a rule is failed, a clean one passed, none not_checked', async () => {
     const snippet = await createSnippet({ code: LOOSE_EQUALITY });
     fakeProvider.respondWith({
@@ -299,17 +351,33 @@ describe('context', () => {
     expect(fakeProvider.lastInput?.prompt).toContain(CONTEXT_FOCUS.test);
   });
 
-  it("the user's context wins over detection: its rules run, and the signals say it was set by the user", async () => {
+  it("a user context adds its rules to the detected context's, and keeps the detected signals", async () => {
     const snippet = await createSnippet({ code: FOCUSED_TEST, context: 'backend' });
     expect(snippet.context).toBe('backend');
 
     const review = await waitForReview((await startReview(snippet.id)).id);
 
-    expect(review).toMatchObject({ status: 'done', context: 'backend', contextSignals: ['set by the user'] });
-    // js/focused-test only runs in a test context.
-    expect(review.findings).toEqual([]);
-    expect(fakeProvider.lastInput?.prompt).toContain('Context: backend (signals: set by the user).');
+    // The choice is on the snippet; the review keeps what detection saw.
+    expect(review).toMatchObject({ status: 'done', context: 'backend', contextSignals: ['calls it()', 'calls expect()'] });
+    // js/focused-test runs for the detected test context even though the user chose backend.
+    expect(ruleFindings(review).map((f: any) => f.ruleId)).toEqual(['js/focused-test']);
+    expect(fakeProvider.lastInput?.prompt).toContain('Context: backend (signals: calls it(); calls expect()).');
     expect(fakeProvider.lastInput?.prompt).toContain(CONTEXT_FOCUS.backend);
+  });
+
+  it('WEB2-4: choosing query for JavaScript with SQL concat still runs js/sql-string-concat', async () => {
+    const code = 'function find(req) {\n  return db.query("SELECT * FROM users WHERE id = " + req.query.id);\n}';
+    const auto = await waitForReview((await startReview((await createSnippet({ code })).id)).id);
+    expect(ruleFindings(auto).map((f: any) => f.ruleId)).toContain('js/sql-string-concat');
+
+    const snippet = await createSnippet({ code, context: 'query' });
+    const review = await waitForReview((await startReview(snippet.id)).id);
+    expect(review).toMatchObject({ status: 'done', context: 'query', contextSignals: auto.contextSignals });
+    expect(auto.contextSignals.length).toBeGreaterThan(0);
+    expect(ruleFindings(review).map((f: any) => f.ruleId)).toContain('js/sql-string-concat');
+    // One finding per (ruleId, lineStart), not one per context.
+    const keys = ruleFindings(review).map((f: any) => `${f.ruleId}:${f.lineStart}`);
+    expect(new Set(keys).size).toBe(keys.length);
   });
 
   it('a user context that matches detection keeps the detected signals', async () => {
