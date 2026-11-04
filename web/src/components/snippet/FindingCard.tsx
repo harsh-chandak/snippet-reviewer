@@ -2,7 +2,7 @@
 
 import { useEffect, useId, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { CategoryTag, FixCheckBadge, SeverityBadge, SourceBadge } from '@/components/shared';
+import { CATEGORY_LABELS, FixCheckBadge, SEVERITY_LABELS, SOURCE_LABELS } from '@/components/shared';
 import type { Finding, FindingStatus, Severity } from '@/lib/types';
 import { FixDiff } from './FixDiff';
 
@@ -18,6 +18,20 @@ const ACCENT: Record<Severity, string> = {
   warning: 'border-l-amber-500',
   info: 'border-l-blue-500',
 };
+
+// The one coloured word that names the severity in a card.
+const SEVERITY_TEXT: Record<Severity, string> = {
+  critical: 'text-red-700 dark:text-red-400',
+  warning: 'text-amber-700 dark:text-amber-400',
+  info: 'text-blue-700 dark:text-blue-400',
+};
+
+// 'Rule · js/sql-string-concat · Security · Line 7' or 'AI · Bug · Lines 5–11'.
+export function findingMeta(f: Finding): string {
+  return [SOURCE_LABELS[f.source], f.source === 'rule' ? f.ruleId : null, CATEGORY_LABELS[f.category], lineLabel(f)]
+    .filter(Boolean)
+    .join(' · ');
+}
 
 // What the API's accepted/dismissed mean to a reader: the finding is right, or it isn't.
 export const STATUS_TEXT: Record<Exclude<FindingStatus, 'open'>, string> = {
@@ -81,9 +95,12 @@ function Prose({ text, className = '' }: { text: string; className?: string }) {
 function CopyFixButton({ text }: { text: string }) {
   const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => {
-    if (timer.current) clearTimeout(timer.current);
-  }, []);
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+    },
+    [],
+  );
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(text);
@@ -195,13 +212,25 @@ export function FindingCard({
           resolved && !selected ? 'opacity-70' : ''
         } ${selected ? '' : 'hover:bg-[var(--surface)]'}`}
       >
-        <span className="flex flex-wrap items-center gap-1.5 text-xs">
-          <SeverityBadge severity={finding.severity} />
-          <SourceBadge source={finding.source} ruleId={finding.ruleId} />
-          <CategoryTag category={finding.category} />
-          {statusTag}
-          <span className="ml-auto flex items-center gap-1.5 font-medium tabular-nums text-[var(--muted)]">
-            {where}
+        {/* Severity is the left edge and one coloured word; the rest is one muted line. */}
+        <span className="flex items-start gap-2 text-xs">
+          <span className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+            <span className={`font-semibold ${SEVERITY_TEXT[finding.severity]}`}>
+              {SEVERITY_LABELS[finding.severity]}
+            </span>
+            <span
+              className="tabular-nums text-[var(--muted)]"
+              title={
+                finding.source === 'rule'
+                  ? `Found by a static rule${finding.ruleId ? ` (${finding.ruleId})` : ''}: exact, no model involved`
+                  : 'Found by the AI model'
+              }
+            >
+              {findingMeta(finding)}
+            </span>
+            {statusTag}
+          </span>
+          <span className="mt-0.5">
             <Chevron open={selected} />
           </span>
         </span>
@@ -231,12 +260,7 @@ export function FindingCard({
             {resolved ? (
               <>
                 {statusTag}
-                <button
-                  type="button"
-                  className={NEUTRAL_BUTTON}
-                  disabled={pending}
-                  onClick={() => onSetStatus('open')}
-                >
+                <button type="button" className={NEUTRAL_BUTTON} disabled={pending} onClick={() => onSetStatus('open')}>
                   Reopen
                 </button>
               </>

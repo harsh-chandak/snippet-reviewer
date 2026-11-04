@@ -1,7 +1,8 @@
 'use client';
 
 import { useId, useState } from 'react';
-import { ContextTag } from '@/components/shared';
+import type { ReactNode } from 'react';
+import { CONTEXT_LABELS, ContextTag } from '@/components/shared';
 import { REVIEW_STEPS, STATIC_LANGUAGES } from '@/lib/types';
 import type { CodeContext, Language, Review, ReviewStep } from '@/lib/types';
 import { StepEvents, useReviewEvents } from './ReviewEvents';
@@ -15,6 +16,13 @@ const STEP_LABELS: Record<ReviewStep, string> = {
   static: 'Static analysis',
   model: 'Model',
   checking: 'Checking fixes',
+};
+
+// The same steps in the folded 'Review details' line.
+const SHORT_STEP_LABELS: Record<ReviewStep, string> = {
+  static: 'Static',
+  model: 'Model',
+  checking: 'Checks',
 };
 
 function plural(n: number, one: string, many = `${one}s`) {
@@ -106,7 +114,8 @@ function stepDetail(step: ReviewStep, state: StepState, review: Review, staticRu
   if (step === 'static') {
     if (!staticRules) return 'No static rules for this language yet';
     if (state === 'running') return 'Parsing the code and running the rules';
-    if (review.analysisError) return `Static analysis stopped: ${review.analysisError}; the model reviewed the code alone`;
+    if (review.analysisError)
+      return `Static analysis stopped: ${review.analysisError}; the model reviewed the code alone`;
     if (state === 'done') return plural(findings.filter((f) => f.source === 'rule').length, 'rule finding');
     return null;
   }
@@ -114,7 +123,8 @@ function stepDetail(step: ReviewStep, state: StepState, review: Review, staticRu
     const model = review.model ? ` (${review.model})` : '';
     if (state === 'running') return `Waiting for the model${model}`;
     if (state === 'done') {
-      const dupes = review.duplicateCount > 0 ? `; ${plural(review.duplicateCount, 'repeat')} of a rule finding dropped` : '';
+      const dupes =
+        review.duplicateCount > 0 ? `; ${plural(review.duplicateCount, 'repeat')} of a rule finding dropped` : '';
       return `${plural(findings.filter((f) => f.source === 'model').length, 'AI finding')}${dupes}${model}`;
     }
     return null;
@@ -124,7 +134,9 @@ function stepDetail(step: ReviewStep, state: StepState, review: Review, staticRu
     const fixes = findings.filter((f) => f.fix).length;
     const checked = findings.filter((f) => f.fix && f.fixCheck !== 'not_checked').length;
     if (!fixes) return 'No fixes to check';
-    return checked === fixes ? `${plural(fixes, 'fix', 'fixes')} checked` : `${checked} of ${plural(fixes, 'fix', 'fixes')} checked`;
+    return checked === fixes
+      ? `${plural(fixes, 'fix', 'fixes')} checked`
+      : `${checked} of ${plural(fixes, 'fix', 'fixes')} checked`;
   }
   return null;
 }
@@ -200,7 +212,12 @@ function StepList({ review, language }: { review: Review; language: Language }) 
             {expandable ? (
               <button
                 type="button"
-                aria-label={[STEP_LABELS[step], STATE_WORDS[state], detail, ms !== undefined ? formatDuration(ms) : null]
+                aria-label={[
+                  STEP_LABELS[step],
+                  STATE_WORDS[state],
+                  detail,
+                  ms !== undefined ? formatDuration(ms) : null,
+                ]
                   .filter(Boolean)
                   .join(', ')}
                 aria-expanded={isOpen}
@@ -238,7 +255,10 @@ function ContextLine({ review, snippetContext }: { review: Review; snippetContex
   return (
     <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-[var(--muted)]">
       <span className="font-medium text-[var(--foreground)]">Context</span>
-      <ContextTag context={review.context} title={byUser ? 'Set by you when the snippet was created' : 'Detected from the code'} />
+      <ContextTag
+        context={review.context}
+        title={byUser ? 'Set by you when the snippet was created' : 'Detected from the code'}
+      />
       <span className="break-words">{why}</span>
     </p>
   );
@@ -272,7 +292,11 @@ export function usageLine(review: Review): string {
     parts.push('cost not configured');
   } else {
     const source =
-      review.costSource === 'cli' ? ' (CLI estimate)' : review.costSource === 'price-config' ? ' (priced from settings)' : '';
+      review.costSource === 'cli'
+        ? ' (CLI estimate)'
+        : review.costSource === 'price-config'
+          ? ' (priced from settings)'
+          : '';
     parts.push(`~${formatUsd(review.costUsd)}${source}`);
   }
   return parts.join(' · ');
@@ -289,8 +313,58 @@ function reachedModel(review: Review): boolean {
   );
 }
 
+// The folded line: 'Static 12 ms · Model 5.7 s · Checks 6 ms · Backend · ~$0.0089'. While the
+// review runs it ends at the current step, with a spinner; a failed step says so.
+function DetailsSummary({ review, language, showCost }: { review: Review; language: Language; showCost: boolean }) {
+  const states = stepStates(review);
+  const staticRules = review.staticSupported ?? STATIC_LANGUAGES.includes(language);
+  const timings = review.phaseTimings ?? {};
+  const active = isActive(review.status);
+  const parts: ReactNode[] = [];
+  for (const step of REVIEW_STEPS) {
+    const state = states[step];
+    const ms = timings[step];
+    if (state === 'waiting') continue;
+    if (state === 'running') {
+      const detail = stepDetail(step, state, review, staticRules);
+      parts.push(
+        <>
+          <Spinner className="h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+          <span className="font-medium text-[var(--foreground)]">{STEP_LABELS[step]}</span>
+          {detail && <span>{detail}</span>}
+        </>,
+      );
+      continue;
+    }
+    const words =
+      state === 'failed' ? 'failed' : state === 'skipped' ? 'not run' : ms !== undefined ? formatDuration(ms) : 'done';
+    parts.push(
+      <span className={state === 'failed' ? 'font-medium text-red-700 dark:text-red-400' : ''}>
+        {SHORT_STEP_LABELS[step]} <span className="tabular-nums">{words}</span>
+      </span>,
+    );
+  }
+  if (!active && review.context) parts.push(CONTEXT_LABELS[review.context]);
+  if (showCost && review.costUsd !== null && review.costUsd !== undefined) {
+    parts.push(<span className="tabular-nums">~{formatUsd(review.costUsd)}</span>);
+  }
+  return (
+    <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[var(--muted)]">
+      {parts.map((part, i) => (
+        // The separator trails its item, so a wrapped line never starts with one.
+        <span key={i} className="inline-flex items-center gap-1.5">
+          {part}
+          {i < parts.length - 1 && <span aria-hidden>&middot;</span>}
+        </span>
+      ))}
+    </span>
+  );
+}
+
 // The steps a review goes through, the context it used and, once the model has answered,
-// what that cost. Sits above the code, under the progress bar or the summary.
+// what that cost, folded into one 'Review details' line under the summary row (collapsed by
+// default; while a review runs the line shows the current step). Opening it shows the step
+// list (each step opens to its events), the context line and the usage line.
 export function ReviewSteps({
   review,
   language,
@@ -300,17 +374,35 @@ export function ReviewSteps({
   language: Language;
   snippetContext: CodeContext | null;
 }) {
+  const [open, setOpen] = useState(false);
+  const panelId = useId();
   if (!hasSteps(review)) return null;
   const showUsage = !isActive(review.status) && reachedModel(review);
   return (
-    <div className="space-y-2.5 rounded-md border border-[var(--border)] bg-[var(--surface)] px-4 py-3">
-      <StepList review={review} language={language} />
-      <ContextLine review={review} snippetContext={snippetContext} />
-      {showUsage && (
-        <p className="text-xs tabular-nums text-[var(--muted)]">
-          <span className="font-medium text-[var(--foreground)]">Usage</span> {usageLine(review)}
-        </p>
-      )}
+    <div className="text-sm">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={panelId}
+        onClick={() => setOpen((o) => !o)}
+        className="-mx-1.5 flex w-[calc(100%+0.75rem)] items-center gap-2 rounded px-1.5 py-0.5 text-left text-xs hover:bg-[var(--background)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-blue-500"
+      >
+        <span className="shrink-0 font-medium text-[var(--foreground)]">Review details</span>
+        <DetailsSummary review={review} language={language} showCost={showUsage} />
+        <span className="ml-auto shrink-0">
+          <Chevron open={open} />
+        </span>
+      </button>
+      {/* Kept mounted while folded, so the steps opened inside it stay open. */}
+      <div id={panelId} hidden={!open} className="mt-2 space-y-2.5 border-t border-[var(--border)] pt-2.5">
+        <StepList review={review} language={language} />
+        <ContextLine review={review} snippetContext={snippetContext} />
+        {showUsage && (
+          <p className="text-xs tabular-nums text-[var(--muted)]">
+            <span className="font-medium text-[var(--foreground)]">Usage</span> {usageLine(review)}
+          </p>
+        )}
+      </div>
     </div>
   );
 }

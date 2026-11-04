@@ -13,8 +13,12 @@ const DOT: Record<Severity, string> = {
 };
 const MUTED_DOT = 'bg-gray-300 dark:bg-gray-600';
 
-// What a line carries: the most severe open finding covering it (null when every finding
-// on it is resolved) and how many findings cover it.
+// A finding this many lines long or shorter gets a dot on each of its lines; a longer one gets
+// no dots, only a bar down the gutter along its range while it is selected or hovered.
+const MAX_DOTTED_SPAN = 3;
+
+// What a dotted line carries: the most severe open finding covering it (null when every
+// finding on it is resolved) and how many findings cover it (what clicking the dot steps through).
 interface LineMark {
   worstOpen: Severity | null;
   count: number;
@@ -40,9 +44,11 @@ function revealLines(box: HTMLElement, start: number, end: number) {
 }
 
 // The code, line by line, with no findings inside it: a severity dot in the gutter for each
-// line a finding covers (the colour of its most severe open finding, muted when all are
-// resolved), the selected finding's lines strongly highlighted and other findings' lines
-// faintly tinted. Clicking a dot selects that line's finding in the list beside it.
+// line a finding of at most 3 lines covers (the colour of the most severe open finding on the
+// line, muted when all are resolved); a longer finding has no dots, only a bar down the gutter
+// along its range while it is selected or hovered. Only the selected finding's lines are
+// highlighted (strongly) and the hovered one's (faintly); other findings tint nothing.
+// Clicking a dot selects that line's finding in the list beside it.
 export function CodeView({
   code,
   lines,
@@ -66,10 +72,18 @@ export function CodeView({
   const last = lines.length;
 
   const marks = useMemo(() => {
+    // Only lines a short finding covers get a dot; the dot then counts every finding on the line.
+    const dotted = new Set<number>();
+    for (const f of findings) {
+      const [start, end] = range(f, last);
+      if (end - start + 1 > MAX_DOTTED_SPAN) continue;
+      for (let n = start; n <= end; n++) dotted.add(n);
+    }
     const marks = new Map<number, LineMark>();
     for (const f of findings) {
       const [start, end] = range(f, last);
       for (let n = start; n <= end; n++) {
+        if (!dotted.has(n)) continue;
         const m = marks.get(n) ?? { worstOpen: null, count: 0 };
         m.count++;
         if (f.status === 'open' && (m.worstOpen === null || SEVERITY_RANK[f.severity] < SEVERITY_RANK[m.worstOpen])) {
@@ -83,6 +97,13 @@ export function CodeView({
 
   const selectedRange = selected ? range(selected, last) : null;
   const highlightedRange = highlighted && highlighted.id !== selected?.id ? range(highlighted, last) : null;
+  // A long finding's gutter bar, in its severity's colour (muted once resolved); the hovered
+  // one's is fainter, and the selected one's wins where the two overlap.
+  const gutterBar = (f: Finding | null, r: [number, number] | null, faint: boolean) =>
+    f && r && r[1] - r[0] + 1 > MAX_DOTTED_SPAN
+      ? { range: r, tone: f.status === 'open' ? DOT[f.severity] : MUTED_DOT, faint }
+      : null;
+  const bars = [gutterBar(selected, selectedRange, false), gutterBar(highlighted, highlightedRange, true)];
 
   // The code scrolls to the selected finding's lines at once, and to a hovered or focused
   // one after a short pause, so running the mouse down the list doesn't shake the code.
@@ -125,20 +146,20 @@ export function CodeView({
             let rowTone = '';
             if (isSelected) rowTone = 'bg-sky-200/70 dark:bg-sky-400/25';
             else if (isHighlighted) rowTone = 'bg-sky-100/80 dark:bg-sky-400/15';
-            else if (mark?.worstOpen) rowTone = 'bg-amber-100/40 dark:bg-amber-400/[0.07]';
-            else if (mark) rowTone = 'bg-gray-100/50 dark:bg-gray-400/[0.05]';
-            const edge = isSelected
-              ? 'border-sky-500'
-              : isHighlighted
-                ? 'border-sky-300 dark:border-sky-700'
-                : 'border-transparent';
+            const bar = bars.find((b) => b && within(b.range, n)) ?? null;
             return (
               <div key={n} data-line={n} className={`flex font-mono text-[13px] leading-5 ${rowTone}`}>
                 {/* The gutter stays put when the code scrolls sideways. */}
-                <span
-                  className={`sticky left-0 z-[1] flex shrink-0 select-none items-center border-r-2 bg-[var(--surface)] ${edge}`}
-                >
-                  <span className="flex w-5 items-center justify-center">
+                <span className="sticky left-0 z-[1] flex shrink-0 select-none items-center bg-[var(--surface)]">
+                  <span className="relative flex h-5 w-5 items-center justify-center">
+                    {bar && (
+                      <span
+                        aria-hidden
+                        className={`absolute inset-x-[9px] w-0.5 ${bar.tone} ${bar.faint ? 'opacity-50' : ''} ${
+                          n === bar.range[0] ? 'top-1 rounded-t-full' : 'top-0'
+                        } ${n === bar.range[1] ? 'bottom-1 rounded-b-full' : 'bottom-0'}`}
+                      />
+                    )}
                     {mark && (
                       <button
                         type="button"
@@ -148,7 +169,7 @@ export function CodeView({
                           mark.worstOpen ? `, most severe open: ${mark.worstOpen}` : ', all resolved'
                         }. Show in the list`}
                         title={`${mark.count} ${mark.count === 1 ? 'finding' : 'findings'} on line ${n}`}
-                        className="flex h-5 w-5 items-center justify-center rounded-full hover:bg-[var(--border)]"
+                        className="relative flex h-5 w-5 items-center justify-center rounded-full hover:bg-[var(--border)]"
                       >
                         <span
                           aria-hidden
