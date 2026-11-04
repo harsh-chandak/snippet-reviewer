@@ -113,7 +113,8 @@ function describe(event: ReviewEvent, findings: Finding[]): EventText | null {
   switch (event.type) {
     case 'static.parsed': {
       const p = event.payload;
-      if (!p.supported) return { text: `No static rules for this language · context ${contextWord(p.context)}` };
+      if (!p.supported)
+        return { text: `Only the language-agnostic rules ran (hard-coded secrets) · context ${contextWord(p.context)}` };
       const parsed = p.parseOk === false ? `Did not parse${p.parseError ? `: ${p.parseError}` : ''}` : 'Parsed OK';
       const rules = p.rulesChecked?.length ? ` · ${plural(p.rulesChecked.length, 'rule')} checked` : '';
       return {

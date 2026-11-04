@@ -3,6 +3,7 @@ import { CODE_CONTEXTS } from '../../src/model/constants';
 import type { OutlineItem, RuleFinding } from '../../src/service/analysis/types';
 import { fakeProvider, FAKE_USAGE } from '../../src/service/llm/fakeProvider';
 import { CONTEXT_FOCUS } from '../../src/service/llm/prompt';
+import { MAX_SUMMARY_CHARS } from '../../src/service/llm/reviewSchema';
 import { LlmError } from '../../src/service/llm/types';
 import { llmService, ReviewInput } from '../../src/service/llmService';
 
@@ -258,5 +259,60 @@ describe('usage', () => {
   it('keeps failWith and delayMs working', async () => {
     fakeProvider.failWith('boom', { delayMs: 10 });
     await expect(llmService.reviewSnippet(input())).rejects.toThrow('boom');
+  });
+});
+
+describe('summary', () => {
+  const SUMMARY = 'Adds one to a constant and logs it. The main risk is the console.log left in shipped code.';
+
+  it('asks for a short optional summary in the prompt and the schema', async () => {
+    await llmService.reviewSnippet(input());
+    expect(fakeProvider.lastInput!.system).toContain('summary');
+    const schema = fakeProvider.lastInput!.jsonSchema as any;
+    expect(schema.properties.summary).toEqual(expect.objectContaining({ type: 'string' }));
+    // Optional: an answer without it is still a valid answer.
+    expect(schema.required).toEqual(['findings']);
+  });
+
+  it('returns the summary the model wrote', async () => {
+    fakeProvider.respondWith({ summary: SUMMARY, findings: [finding()] });
+    const result = await llmService.reviewSnippet(input());
+    expect(result.summary).toBe(SUMMARY);
+    expect(result.findings).toHaveLength(1);
+  });
+
+  it('is null when the model wrote none, and with nothing queued', async () => {
+    fakeProvider.respondWith({ findings: [finding()] });
+    expect((await llmService.reviewSnippet(input())).summary).toBeNull();
+    expect((await llmService.reviewSnippet(input())).summary).toBeNull();
+  });
+
+  it('is null when the summary is not a string or is blank, and the findings are kept', async () => {
+    for (const summary of [42, null, { text: 'x' }, ['a'], '', '   \n\t ', '\u0000\u0007']) {
+      fakeProvider.respondWith({ summary, findings: [finding()] });
+      const result = await llmService.reviewSnippet(input());
+      expect(result.summary, JSON.stringify(summary)).toBeNull();
+      expect(result.findings).toHaveLength(1);
+      expect(result.rejected).toEqual([]);
+    }
+  });
+
+  it('strips control characters and escape codes, and collapses whitespace', async () => {
+    fakeProvider.respondWith({ summary: '  Parses\u0000 input.\n\nThe main\u001b[31m risk\u0007 is\tSQL.  ', findings: [] });
+    expect((await llmService.reviewSnippet(input())).summary).toBe('Parses input. The main risk is SQL.');
+  });
+
+  it('cuts it to 400 characters without splitting a surrogate pair', async () => {
+    fakeProvider.respondWith({ summary: 'a'.repeat(1000), findings: [] });
+    const long = (await llmService.reviewSnippet(input())).summary!;
+    expect(long).toHaveLength(MAX_SUMMARY_CHARS);
+    expect(MAX_SUMMARY_CHARS).toBe(400);
+
+    // An emoji (two UTF-16 units) straddling the cut is dropped whole, and a lone surrogate is removed.
+    fakeProvider.respondWith({ summary: `${'b'.repeat(399)}\u{1F600}tail \uD800x`, findings: [] });
+    const cut = (await llmService.reviewSnippet(input())).summary!;
+    expect(cut).toBe('b'.repeat(399));
+    fakeProvider.respondWith({ summary: 'lone \uDC00surrogate', findings: [] });
+    expect((await llmService.reviewSnippet(input())).summary).toBe('lone surrogate');
   });
 });

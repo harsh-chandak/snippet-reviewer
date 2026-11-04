@@ -17,6 +17,7 @@ import { CONTEXT_LABELS, ErrorBanner, LANGUAGE_LABELS } from '@/components/share
 import { CodeCounter, countCode } from './CodeCounter';
 import { CodeEditor } from './CodeEditor';
 import { FieldError } from './FieldError';
+import { CODE_EXAMPLES, type CodeExample } from './examples';
 
 const MAX_TITLE_CHARS = 200;
 const FIELDS = ['title', 'language', 'context', 'code'] as const;
@@ -145,11 +146,45 @@ export function SnippetForm() {
     }
   }
 
+  // Fill title, language and code with a buggy example. Code the user typed is only replaced
+  // after they confirm; an earlier example is replaced without asking.
+  function loadExample(example: CodeExample) {
+    const isExample = CODE_EXAMPLES.some((e) => e.code === code);
+    if (code.trim() && !isExample && !window.confirm('Replace the code you entered with the example?')) return;
+    setTitle(example.title);
+    setLanguage(example.language);
+    setCode(example.code);
+    setContext('auto');
+    setFieldErrors({});
+    setFormError(null);
+  }
+
   const describe = (...parts: (string | false | undefined)[]) => parts.filter(Boolean).join(' ') || undefined;
 
   return (
     <form onSubmit={onSubmit} noValidate className="space-y-6">
       {formError && <ErrorBanner title="Could not create the snippet" message={formError} />}
+
+      <div
+        role="group"
+        aria-labelledby={`${id}-examples`}
+        className="flex flex-wrap items-center gap-2 rounded-md border border-dashed border-[var(--border)] px-3 py-2.5"
+      >
+        <span id={`${id}-examples`} className="text-sm text-[var(--muted)]">
+          No code to hand? Load an example:
+        </span>
+        {CODE_EXAMPLES.map((example) => (
+          <button
+            key={example.language}
+            type="button"
+            onClick={() => loadExample(example)}
+            aria-label={`Load an example in ${example.label}`}
+            className="rounded-md border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1 text-xs font-medium hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 dark:hover:bg-gray-800"
+          >
+            {example.label}
+          </button>
+        ))}
+      </div>
 
       <div>
         <label htmlFor={ids.title} className="mb-1.5 block text-sm font-medium">

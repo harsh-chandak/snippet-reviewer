@@ -8,7 +8,7 @@ export default function NewSnippetPage() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">New snippet</h1>
         <p className="mt-1 text-sm text-[var(--muted)]">
-          Paste the code you want reviewed. Findings show up inline, under the lines they refer to.
+          Paste the code you want reviewed, or load an example. The review lists each finding next to the code and highlights the lines it is about.
         </p>
       </div>
       <SnippetForm />

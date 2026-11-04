@@ -132,6 +132,9 @@ export interface Review {
   // Why static analysis stopped (out of time or memory, or the analyzer failed), in plain words; the
   // review then went on model-only with no rule findings. Null when it finished; absent from older APIs.
   analysisError?: string | null;
+  // The model's 2-3 sentence overview (what the code does, then its main risk), plain text from the
+  // model, cleaned and cut to 400 characters by the API. Null when there is none; absent from older APIs.
+  summary?: string | null;
   duplicateCount: number; // model findings dropped because a rule already reported them
   model: string | null;
   inputTokens: number | null;

@@ -2,7 +2,7 @@ import { anthropicProvider } from './llm/anthropicProvider';
 import { claudeHeadlessProvider } from './llm/claudeHeadlessProvider';
 import { fakeProvider } from './llm/fakeProvider';
 import { buildReviewPrompt, MAX_OUTLINE_ITEMS, REVIEW_SYSTEM_PROMPT } from './llm/prompt';
-import { findingValidator, fixValidator, LlmFinding, MAX_FINDINGS, reviewJsonSchema } from './llm/reviewSchema';
+import { cleanSummary, findingValidator, fixValidator, LlmFinding, MAX_FINDINGS, reviewJsonSchema } from './llm/reviewSchema';
 import { LlmError, LlmProvider, LlmUsage } from './llm/types';
 import { CATEGORIES, CodeContext, Language } from '../model/constants';
 import { OutlineItem, RuleFinding } from './analysis/types';
@@ -53,6 +53,8 @@ export interface DuplicateHit {
 
 export interface ReviewResult {
   findings: LlmFinding[];
+  // The model's short overview, cleaned (see cleanSummary); null when it wrote none or an invalid one.
+  summary: string | null;
   // Model findings dropped because a rule already reported the same thing: how many, and each one.
   duplicates: number;
   duplicateHits: DuplicateHit[];
@@ -97,7 +99,8 @@ class LlmService {
       const key = `${f.lineStart}:${f.category}`;
       if (!reported.has(key)) reported.set(key, f.ruleId);
     }
-    const result: ReviewResult = { findings: [], rejected: [], duplicates: 0, duplicateHits: [], usage, sent };
+    const summary = cleanSummary((output as { summary?: unknown }).summary);
+    const result: ReviewResult = { findings: [], summary, rejected: [], duplicates: 0, duplicateHits: [], usage, sent };
 
     for (const item of items) {
       const { error, value } = findingValidator.validate(withoutNulText(item), { stripUnknown: true });

@@ -10,7 +10,7 @@ export function SnippetTableSkeleton() {
       <span className="sr-only" role="status">
         Loading snippets
       </span>
-      <table aria-hidden className="w-full min-w-[36rem] text-left text-sm">
+      <table aria-hidden className="w-full min-w-[44rem] text-left text-sm">
         <SnippetTableHead />
         <tbody className="divide-y divide-[var(--border)]">
           {TITLE_WIDTHS.map((width, i) => (
@@ -23,6 +23,9 @@ export function SnippetTableSkeleton() {
               </td>
               <td className="px-4 py-4">
                 <span className={`${BAR} w-20`} />
+              </td>
+              <td className="px-4 py-4">
+                <span className={`${BAR} w-24`} />
               </td>
               <td className="px-4 py-4">
                 <span className={`${BAR} ml-auto w-28`} />

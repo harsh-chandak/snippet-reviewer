@@ -16,6 +16,8 @@ export interface LlmFinding {
 export const reviewJsonSchema = {
   type: 'object',
   properties: {
+    // Optional: 2-3 plain sentences, what the code does and then its main risk.
+    summary: { type: 'string', maxLength: 400 },
     findings: {
       type: 'array',
       items: {
@@ -49,6 +51,28 @@ export const reviewJsonSchema = {
 export const MAX_FINDINGS = 100;
 export const MAX_DESCRIPTION_CHARS = 2000;
 export const MAX_FIX_CHARS = 4000;
+export const MAX_SUMMARY_CHARS = 400;
+
+// The model's summary as we store it, or null. Optional and never a reason to fail the review or
+// drop a finding: anything that isn't a string, or is blank once cleaned, is just no summary.
+// Cleaned like any text from outside that a user reads: no control characters or terminal escape
+// codes, no lone surrogates (Postgres text can't hold them as written), whitespace collapsed, and
+// cut to MAX_SUMMARY_CHARS without splitting a surrogate pair.
+export function cleanSummary(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  let text = value
+    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (text.length > MAX_SUMMARY_CHARS) {
+    text = text.slice(0, MAX_SUMMARY_CHARS);
+    if (/[\uD800-\uDBFF]$/.test(text)) text = text.slice(0, -1);
+    text = text.trimEnd();
+  }
+  return text || null;
+}
 
 // A model fix that is malformed is dropped (fix: null), but the finding it came with is kept.
 export const fixValidator = Joi.object<FixReplacement>({
