@@ -7,7 +7,7 @@ export interface LlmFinding {
   severity: (typeof SEVERITIES)[number];
   category: (typeof CATEGORIES)[number];
   description: string;
-  suggestedFix?: string;
+  suggestedFix?: string | null;
 }
 
 // Sent to the model so it answers in this exact shape.
@@ -40,5 +40,6 @@ export const findingValidator = Joi.object<LlmFinding>({
   severity: Joi.string().valid(...SEVERITIES).required(),
   category: Joi.string().valid(...CATEGORIES).required(),
   description: Joi.string().trim().min(1).required(),
-  suggestedFix: Joi.string().trim().allow(''),
+  // Optional: a model that writes null or "" means "no fix", which is not a reason to drop the finding.
+  suggestedFix: Joi.string().trim().allow('', null),
 });

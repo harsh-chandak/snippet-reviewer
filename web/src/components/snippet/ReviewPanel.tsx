@@ -67,13 +67,26 @@ function RejectedNote({ count }: { count: number }) {
   return (
     <p className="text-xs text-[var(--muted)]">
       {plural(count, 'suggestion was', 'suggestions were')} dropped because{' '}
-      {count === 1 ? 'it pointed' : 'they pointed'} at lines that don&apos;t exist in this snippet.
+      {count === 1 ? 'it' : 'they'} didn&apos;t pass our checks (a missing or invalid field, or lines that
+      don&apos;t exist in this snippet).
     </p>
   );
 }
 
 function Summary({ review }: { review: Review }) {
   const findings = review.findings ?? [];
+  // Nothing usable came back, but the model did say something: never call that "no issues".
+  if (findings.length === 0 && review.rejectedCount > 0) {
+    return (
+      <div className="space-y-1 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 dark:border-amber-800 dark:bg-amber-950">
+        <p className="text-sm font-semibold text-amber-900 dark:text-amber-200">This review couldn&apos;t be used</p>
+        <p className="text-sm text-amber-900 dark:text-amber-200">
+          The model returned {plural(review.rejectedCount, 'suggestion')}, but none passed our checks, so nothing is
+          shown. Run the review again.
+        </p>
+      </div>
+    );
+  }
   if (findings.length === 0) {
     return (
       <div className="space-y-1 rounded-md border border-green-300 bg-green-50 px-4 py-3 dark:border-green-800 dark:bg-green-950">
@@ -83,7 +96,6 @@ function Summary({ review }: { review: Review }) {
           </svg>
           No issues found
         </p>
-        <RejectedNote count={review.rejectedCount} />
       </div>
     );
   }

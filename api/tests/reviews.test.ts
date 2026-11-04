@@ -86,6 +86,27 @@ describe('POST /snippets/:id/reviews', () => {
     expect((await getSnippet(snippet.id)).reviewStatus).toBe('reviewed');
   });
 
+  it('keeps a finding whose optional suggestedFix is null', async () => {
+    const snippet = await createSnippet({ code: FIVE_LINES });
+    fakeProvider.respondWith({ findings: [finding({ lineStart: 2, lineEnd: 2, suggestedFix: null })] });
+
+    const review = await waitForReview((await startReview(snippet.id)).id);
+
+    expect(review.rejectedCount).toBe(0);
+    expect(review.findings).toHaveLength(1);
+    expect(review.findings[0].suggestedFix).toBeNull();
+  });
+
+  it('a review whose every finding is rejected is done with zero findings and the rejected count', async () => {
+    const snippet = await createSnippet({ code: FIVE_LINES });
+    fakeProvider.respondWith({ findings: [finding({ severity: 'error' }), finding({ lineStart: 99, lineEnd: 99 })] });
+
+    const review = await waitForReview((await startReview(snippet.id)).id);
+
+    // The page reads exactly this shape to say "this review couldn't be used", never "no issues found".
+    expect(review).toMatchObject({ status: 'done', rejectedCount: 2, findings: [] });
+  });
+
   it('drops findings past the last line and invalid ones, and counts them in rejectedCount', async () => {
     const snippet = await createSnippet({ code: 'a\nb\nc' });
     fakeProvider.respondWith({
