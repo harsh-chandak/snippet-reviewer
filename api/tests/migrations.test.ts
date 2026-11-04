@@ -4,10 +4,12 @@ import db from '../src/db/postgres';
 import { migrator } from '../src/db/migrator';
 
 // The test database was built by globalSetup with every migration. This file takes 004 down to 003
-// and up again, on its own database (TEST_DATABASE_NAME), and checks the columns and CHECKs each way.
-// It ends with every migration applied, so other files that run after it see the full schema.
+// and 005 down to 004, and up again, on its own database (TEST_DATABASE_NAME), and checks the
+// columns, CHECKs and views each way. It ends with every migration applied, so other files that run
+// after it see the full schema.
 
 const M004 = '004-static-analysis.ts';
+const M005 = '005-review-events.ts';
 
 const NEW_COLUMNS: Record<string, Record<string, { type: string; nullable: boolean; default: string | null }>> = {
   reviews: {
@@ -93,16 +95,17 @@ async function expectSchemaAt004() {
   expect(await checkNames()).toEqual(expect.arrayContaining(NEW_CHECKS));
 }
 
-describe('migration 004-static-analysis', () => {
-  afterAll(async () => {
-    // Leave the database fully migrated whatever happened above.
-    await migrator.up();
-    await db.query('TRUNCATE TABLE findings, reviews, snippets RESTART IDENTITY CASCADE');
-    await db.close();
-  });
+afterAll(async () => {
+  // Leave the database fully migrated whatever happened below.
+  await migrator.up();
+  await db.query('TRUNCATE TABLE review_events, findings, reviews, snippets RESTART IDENTITY CASCADE');
+  await db.close();
+});
 
+describe('migration 004-static-analysis', () => {
   it('is applied by the test setup, with the decided columns, defaults and CHECKs', async () => {
-    expect((await executed()).at(-1)).toBe(M004);
+    expect(await executed()).toContain(M004);
+    expect((await executed()).at(-1)).toBe(M005);
     await expectSchemaAt004();
   });
 
@@ -175,7 +178,7 @@ describe('migration 004-static-analysis', () => {
     );
 
     await migrator.up();
-    expect((await executed()).at(-1)).toBe(M004);
+    expect((await executed()).at(-1)).toBe(M005);
     await expectSchemaAt004();
 
     const rows = await db.query<{ status: string; phase: string }>('SELECT status, phase FROM reviews ORDER BY id', {
@@ -185,5 +188,226 @@ describe('migration 004-static-analysis', () => {
       { status: 'done', phase: 'done' },
       { status: 'failed', phase: 'failed' },
     ]);
+  });
+});
+
+const EVENT_TYPES = [
+  'review.started',
+  'static.parsed',
+  'static.rule_hit',
+  'model.called',
+  'model.failed',
+  'model.finding_kept',
+  'model.finding_rejected',
+  'model.duplicate',
+  'fix.checked',
+  'review.done',
+  'review.failed',
+  'finding.resolved',
+  'events.truncated',
+];
+const VIEWS = ['v_model_rejections', 'v_review_costs', 'v_rule_feedback'];
+
+async function tableExists(name: string) {
+  const [row] = await db.query<{ t: string | null }>(`SELECT to_regclass(:name)::text AS t`, {
+    replacements: { name },
+    type: QueryTypes.SELECT,
+  });
+  return row.t !== null;
+}
+
+async function views() {
+  const rows = await db.query<{ name: string }>(
+    `SELECT table_name AS name FROM information_schema.views WHERE table_schema = 'public' ORDER BY 1`,
+    { type: QueryTypes.SELECT },
+  );
+  return rows.map((r) => r.name);
+}
+
+async function viewColumns(view: string) {
+  const rows = await db.query<{ name: string }>(
+    `SELECT column_name AS name FROM information_schema.columns WHERE table_name = :view ORDER BY ordinal_position`,
+    { replacements: { view }, type: QueryTypes.SELECT },
+  );
+  return rows.map((r) => r.name);
+}
+
+async function expectSchemaAt005() {
+  expect(await columns('review_events')).toEqual({
+    id: { type: 'integer', nullable: false, default: "nextval('review_events_id_seq'::regclass)" },
+    reviewId: { type: 'integer', nullable: false, default: null },
+    type: { type: 'character varying(40)', nullable: false, default: null },
+    payload: { type: 'jsonb', nullable: false, default: "'{}'::jsonb" },
+    createdAt: { type: 'timestamp with time zone', nullable: false, default: 'now()' },
+  });
+  const reviews = await columns('reviews');
+  expect(reviews.promptVersion).toEqual({ type: 'character varying(40)', nullable: true, default: null });
+  expect(reviews.rulesetVersion).toEqual({ type: 'character varying(40)', nullable: true, default: null });
+
+  const [fk] = await db.query<{ def: string }>(
+    `SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conrelid = 'review_events'::regclass AND contype = 'f'`,
+    { type: QueryTypes.SELECT },
+  );
+  expect(fk.def).toContain('REFERENCES reviews(id)');
+  expect(fk.def).toContain('ON DELETE CASCADE');
+  const [index] = await db.query<{ def: string }>(
+    `SELECT indexdef AS def FROM pg_indexes WHERE tablename = 'review_events' AND indexname = 'review_events_review_id_id'`,
+    { type: QueryTypes.SELECT },
+  );
+  expect(index.def).toContain('("reviewId", id)');
+
+  expect(await views()).toEqual(expect.arrayContaining(VIEWS));
+  expect(await viewColumns('v_rule_feedback')).toEqual(['ruleId', 'findings', 'accepted', 'dismissed', 'open', 'dismiss_rate']);
+  expect(await viewColumns('v_review_costs')).toEqual([
+    'reviewId',
+    'language',
+    'context',
+    'model',
+    'promptVersion',
+    'totalInputTokens',
+    'outputTokens',
+    'cacheReadTokens',
+    'costUsd',
+    'staticMs',
+    'modelMs',
+    'checkingMs',
+  ]);
+  expect(await viewColumns('v_model_rejections')).toEqual(['reason', 'count']);
+}
+
+describe('migration 005-review-events', () => {
+  it('is applied by the test setup, with the decided table, CHECK, index, version columns and views', async () => {
+    expect((await executed()).at(-1)).toBe(M005);
+    await expectSchemaAt005();
+  });
+
+  it('accepts every decided event type, fills the defaults, refuses any other type and cascades on delete', async () => {
+    await db.query('TRUNCATE TABLE review_events, findings, reviews, snippets RESTART IDENTITY CASCADE');
+    await db.query(`INSERT INTO snippets (title, language, code, "createdAt", "updatedAt") VALUES ('t', 'sql', 'SELECT 1', now(), now())`);
+    await db.query(`INSERT INTO reviews ("snippetId", provider, "createdAt", "updatedAt") VALUES (1, 'fake', now(), now())`);
+
+    for (const type of EVENT_TYPES) {
+      expect(await rejects(`INSERT INTO review_events ("reviewId", type) VALUES (1, '${type}')`), type).toBeNull();
+    }
+    expect(await rejects(`INSERT INTO review_events ("reviewId", type) VALUES (1, 'model.thought')`)).toBe(
+      'review_events_type_check',
+    );
+
+    await db.query(`INSERT INTO review_events ("reviewId", type) VALUES (1, 'review.started')`);
+    const [row] = await db.query<Record<string, unknown>>('SELECT * FROM review_events', { type: QueryTypes.SELECT });
+    expect(row).toMatchObject({ reviewId: 1, type: 'review.started', payload: {} });
+    expect(row.createdAt).toBeInstanceOf(Date);
+
+    const [review] = await db.query<Record<string, unknown>>('SELECT * FROM reviews', { type: QueryTypes.SELECT });
+    expect(review).toMatchObject({ promptVersion: null, rulesetVersion: null });
+
+    const t = await db.transaction();
+    try {
+      await db.query('DELETE FROM reviews', { transaction: t });
+      const [{ n }] = await db.query<{ n: number }>('SELECT count(*)::int AS n FROM review_events', {
+        type: QueryTypes.SELECT,
+        transaction: t,
+      });
+      expect(n).toBe(0);
+    } finally {
+      await t.rollback();
+    }
+  });
+
+  it('answers the first questions from the views', async () => {
+    await db.query('TRUNCATE TABLE review_events, findings, reviews, snippets RESTART IDENTITY CASCADE');
+    await db.query(`INSERT INTO snippets (title, language, code, "createdAt", "updatedAt") VALUES ('t', 'javascript', 'x', now(), now())`);
+    await db.query(
+      `INSERT INTO reviews ("snippetId", provider, status, phase, context, model, "promptVersion", "inputTokens", "outputTokens",
+                            "cacheReadTokens", "cacheWriteTokens", "costUsd", "phaseTimings", "createdAt", "updatedAt")
+       VALUES (1, 'fake', 'done', 'done', 'backend', 'm', 'abc123def456', 2, 407, 10, 1948, 0.0089,
+               '{"static": 12, "model": 5800, "checking": 3}', now(), now()),
+              (1, 'fake', 'failed', 'failed', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '{}', now(), now())`,
+    );
+    const insertFinding = (source: string, ruleId: string | null, status: string) =>
+      db.query(
+        `INSERT INTO findings ("reviewId", source, "ruleId", status, "lineStart", "lineEnd", severity, category, description, "createdAt", "updatedAt")
+         VALUES (1, :source, :ruleId, :status, 1, 1, 'warning', 'bug', 'x', now(), now())`,
+        { replacements: { source, ruleId, status } },
+      );
+    await insertFinding('rule', 'js/eval', 'accepted');
+    await insertFinding('rule', 'js/eval', 'dismissed');
+    await insertFinding('rule', 'js/eval', 'dismissed');
+    await insertFinding('rule', 'js/eval', 'open');
+    await insertFinding('rule', 'js/loose-equality', 'open');
+    await insertFinding('model', null, 'dismissed');
+
+    const feedback = await db.query('SELECT * FROM v_rule_feedback ORDER BY "ruleId"', { type: QueryTypes.SELECT });
+    expect(feedback).toEqual([
+      { ruleId: 'js/eval', findings: 4, accepted: 1, dismissed: 2, open: 1, dismiss_rate: 2 / 3 },
+      { ruleId: 'js/loose-equality', findings: 1, accepted: 0, dismissed: 0, open: 1, dismiss_rate: null },
+    ]);
+
+    const costs = await db.query('SELECT * FROM v_review_costs ORDER BY "reviewId"', { type: QueryTypes.SELECT });
+    expect(costs).toEqual([
+      {
+        reviewId: 1,
+        language: 'javascript',
+        context: 'backend',
+        model: 'm',
+        promptVersion: 'abc123def456',
+        totalInputTokens: 1960,
+        outputTokens: 407,
+        cacheReadTokens: 10,
+        costUsd: 0.0089,
+        staticMs: 12,
+        modelMs: 5800,
+        checkingMs: 3,
+      },
+      {
+        reviewId: 2,
+        language: 'javascript',
+        context: null,
+        model: null,
+        promptVersion: null,
+        totalInputTokens: null,
+        outputTokens: null,
+        cacheReadTokens: null,
+        costUsd: null,
+        staticMs: null,
+        modelMs: null,
+        checkingMs: null,
+      },
+    ]);
+
+    await db.query(
+      `INSERT INTO review_events ("reviewId", type, payload) VALUES
+         (1, 'model.finding_rejected', '{"reason": "\\"severity\\" must be one of [critical, warning, info]", "raw": "{}"}'),
+         (1, 'model.finding_rejected', '{"reason": "over the 100-finding limit", "raw": "{}"}'),
+         (1, 'model.finding_rejected', '{"reason": "over the 100-finding limit", "raw": "{}"}'),
+         (1, 'model.duplicate', '{"reason": "not a rejection"}')`,
+    );
+    const rejections = await db.query('SELECT * FROM v_model_rejections', { type: QueryTypes.SELECT });
+    expect(rejections).toEqual([
+      { reason: 'over the 100-finding limit', count: 2 },
+      { reason: '"severity" must be one of [critical, warning, info]', count: 1 },
+    ]);
+  });
+
+  it('goes down to 004, dropping the table, the views and the version columns, and keeps the reviews', async () => {
+    await migrator.down({ to: M005 });
+    expect((await executed()).at(-1)).toBe(M004);
+
+    expect(await tableExists('review_events')).toBe(false);
+    for (const view of VIEWS) expect(await views()).not.toContain(view);
+    const reviews = await columns('reviews');
+    expect(reviews.promptVersion).toBeUndefined();
+    expect(reviews.rulesetVersion).toBeUndefined();
+    // 004's columns are untouched.
+    await expectSchemaAt004();
+
+    const [{ n }] = await db.query<{ n: number }>('SELECT count(*)::int AS n FROM reviews', { type: QueryTypes.SELECT });
+    expect(n).toBe(2);
+  });
+
+  it('goes up again', async () => {
+    await migrator.up();
+    expect((await executed()).at(-1)).toBe(M005);
+    await expectSchemaAt005();
   });
 });

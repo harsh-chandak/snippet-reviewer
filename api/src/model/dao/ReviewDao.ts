@@ -30,8 +30,15 @@ const withFindings = {
 };
 
 class ReviewDao {
-  async create(data: { snippetId: number; provider: string }, transaction?: Transaction) {
+  async create(
+    data: { snippetId: number; provider: string; promptVersion: string; rulesetVersion: string },
+    transaction?: Transaction,
+  ) {
     return Review.create(data, { transaction });
+  }
+
+  async findById(id: number) {
+    return Review.findByPk(id);
   }
 
   async findByIdWithFindings(id: number) {

@@ -28,7 +28,7 @@ export const CONTEXT_FOCUS: Record<CodeContext, string> = {
     'The kind of code could not be determined. Review for general correctness, security and performance, and do not assume a framework.',
 };
 
-const MAX_OUTLINE_ITEMS = 40;
+export const MAX_OUTLINE_ITEMS = 40;
 const MAX_LABEL_CHARS = 80;
 const MAX_RULE_TEXT_CHARS = 300;
 

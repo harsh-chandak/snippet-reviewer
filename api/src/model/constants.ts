@@ -53,3 +53,27 @@ export type FindingSource = (typeof FINDING_SOURCES)[number];
 // passed (every check that could run passed), failed (at least one check failed).
 export const FIX_CHECKS = ['not_checked', 'passed', 'failed'] as const;
 export type FixCheck = (typeof FIX_CHECKS)[number];
+
+// What a review's event log records, one type per thing that happens (the decision 'review event types').
+// finding.resolved is the user's label on a finding; events.truncated says the log hit its size limit.
+export const REVIEW_EVENT_TYPES = [
+  'review.started',
+  'static.parsed',
+  'static.rule_hit',
+  'model.called',
+  'model.failed',
+  'model.finding_kept',
+  'model.finding_rejected',
+  'model.duplicate',
+  'fix.checked',
+  'review.done',
+  'review.failed',
+  'finding.resolved',
+  'events.truncated',
+] as const;
+export type ReviewEventType = (typeof REVIEW_EVENT_TYPES)[number];
+
+// A hostile model answer must not flood the log: at most this many events per review, the last
+// of them events.truncated when anything was dropped. A rejected suggestion keeps this much of its JSON.
+export const MAX_EVENTS_PER_REVIEW = 500;
+export const MAX_REJECTED_RAW_CHARS = 2000;

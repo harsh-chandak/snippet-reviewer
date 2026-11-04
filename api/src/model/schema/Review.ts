@@ -49,6 +49,10 @@ class Review extends Model<InferAttributes<Review>, InferCreationAttributes<Revi
   declare cacheWriteTokens: CreationOptional<number | null>;
   declare costUsd: CreationOptional<number | null>;
   declare costSource: CreationOptional<CostSource | null>;
+  // Which prompt and which rule set produced this review (see service/versions.ts), so a change in
+  // dismiss rate can be tied to the change that caused it.
+  declare promptVersion: CreationOptional<string | null>;
+  declare rulesetVersion: CreationOptional<string | null>;
   declare startedAt: CreationOptional<Date | null>;
   declare completedAt: CreationOptional<Date | null>;
   declare createdAt: CreationOptional<Date>;
@@ -97,6 +101,8 @@ Review.init(
       defaultValue: null,
       validate: { isIn: [COST_SOURCES as unknown as string[]] },
     },
+    promptVersion: { type: DataTypes.STRING(40), allowNull: true, defaultValue: null },
+    rulesetVersion: { type: DataTypes.STRING(40), allowNull: true, defaultValue: null },
     startedAt: { type: DataTypes.DATE, allowNull: true, defaultValue: null },
     completedAt: { type: DataTypes.DATE, allowNull: true, defaultValue: null },
     createdAt: { type: DataTypes.DATE, allowNull: false },

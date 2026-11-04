@@ -65,8 +65,13 @@ class FindingDao {
     return Finding.findByPk(id);
   }
 
-  async setStatus(id: number, status: FindingStatus) {
-    const [count] = await Finding.update({ status }, { where: { id } });
+  // Locks the row until the transaction ends, so two label changes at once each see the other's result.
+  async findByIdForUpdate(id: number, transaction: Transaction) {
+    return Finding.findByPk(id, { transaction, lock: transaction.LOCK.UPDATE });
+  }
+
+  async setStatus(id: number, status: FindingStatus, transaction?: Transaction) {
+    const [count] = await Finding.update({ status }, { where: { id }, transaction });
     return count > 0;
   }
 }

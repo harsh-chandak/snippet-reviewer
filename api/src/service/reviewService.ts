@@ -11,8 +11,10 @@ import { analyzeSnippet } from './analysis';
 import { checkFix } from './analysis/fixCheck';
 import { FixReplacement } from './analysis/types';
 import { HttpError } from '../utils/httpError';
-import { CodeContext, FindingSource, Language } from '../model/constants';
+import { CodeContext, FindingSource, Language, ReviewPhase } from '../model/constants';
 import { toUserMessage } from '../utils/userMessage';
+import { event, rawSuggestion, ReviewEventBuffer, reviewEventService, totalInputTokens } from './reviewEventService';
+import { PROMPT_VERSION, RULESET_VERSION } from './versions';
 
 // Thrown inside run() when the review is no longer in the state this run expects.
 class SupersededError extends Error {}
@@ -27,6 +29,25 @@ interface SnippetForRun {
 
 // The signal stored when the user set the context and it differs from what detection found.
 const USER_SET_SIGNAL = 'set by the user';
+
+const INTERRUPTED_MESSAGE = 'The server restarted before this review finished. Run it again.';
+
+// Only our own LlmError messages are safe and useful to show the user.
+function failureMessage(err: unknown): string {
+  return err instanceof LlmError ? toUserMessage(err.message) : 'The review failed unexpectedly';
+}
+
+function fixCheckedEvent(findingId: number, source: FindingSource, ruleId: string | null, checked: CheckedFix) {
+  return event('fix.checked', {
+    findingId,
+    source,
+    ruleId,
+    fixCheck: checked.fixCheck,
+    parses: checked.fixCheckDetail?.parses ?? null,
+    ruleCleared: checked.fixCheckDetail?.ruleCleared ?? null,
+    newRuleIds: checked.fixCheckDetail?.newRuleIds ?? [],
+  });
+}
 
 function usageColumns(usage: LlmUsage | null): ReviewUpdate {
   if (!usage) return {};
@@ -51,8 +72,13 @@ class ReviewService {
     let review;
     try {
       review = await db.transaction(async (transaction) => {
-        const created = await reviewDao.create({ snippetId, provider: llmService.providerName }, transaction);
+        const provider = llmService.providerName;
+        const created = await reviewDao.create(
+          { snippetId, provider, promptVersion: PROMPT_VERSION, rulesetVersion: RULESET_VERSION },
+          transaction,
+        );
         await snippetDao.setReviewStatus(snippetId, 'in_progress', transaction);
+        await reviewEventService.append(created.id, [event('review.started', { provider })], transaction);
         return created;
       });
     } catch (err) {
@@ -75,6 +101,10 @@ class ReviewService {
     return review;
   }
 
+  async events(reviewId: number) {
+    return reviewEventService.listForReview(reviewId);
+  }
+
   // Every path ends with the review marked done or failed, so nothing is left "in progress".
   // Each step only moves the review on from the state it expects. If something else moved it
   // first (another instance marked it failed at startup, say), this run stops and writes nothing.
@@ -83,9 +113,16 @@ class ReviewService {
   // so the page shows them while the model runs) -> model (the model gets the context, outline and
   // rule findings) -> checking (every finding with a fix gets it checked) -> done. A failure in any
   // phase fails the review; rule findings already saved stay.
+  //
+  // Each step's events go into the review's event log in the same transaction that saves the
+  // step's results, so the log never claims something that wasn't saved.
   private async run(reviewId: number, snippet: SnippetForRun) {
     const { snippetId, language, code } = snippet;
     const timings: PhaseTimings = {};
+    const runStart = Date.now();
+    const events = new ReviewEventBuffer(reviewId);
+    let phase: ReviewPhase = 'queued';
+    let modelFailure: { message: string; ms: number } | null = null;
     try {
       // static
       const started = await reviewDao.updateIfStatus(reviewId, ['pending'], {
@@ -94,6 +131,7 @@ class ReviewService {
         startedAt: new Date(),
       });
       if (!started) throw new SupersededError();
+      phase = 'static';
 
       let phaseStart = Date.now();
       const analysis = await analyzeSnippet(language, code, snippet.context ?? undefined);
@@ -117,8 +155,32 @@ class ReviewService {
           transaction,
         );
         if (!moved) throw new SupersededError();
-        return findingDao.createRuleFindings(reviewId, analysis.findings, transaction);
+        const rows = await findingDao.createRuleFindings(reviewId, analysis.findings, transaction);
+        events.add(
+          event('static.parsed', {
+            supported: analysis.supported,
+            parseOk: analysis.parseOk,
+            parseError: analysis.parseError,
+            context,
+            signals,
+            outlineItems: analysis.outline.length,
+            ms: timings.static!,
+          }),
+          ...analysis.findings.map((f) =>
+            event('static.rule_hit', {
+              ruleId: f.ruleId,
+              lineStart: f.lineStart,
+              lineEnd: f.lineEnd,
+              severity: f.severity,
+              category: f.category,
+              hasFix: !!f.fix,
+            }),
+          ),
+        );
+        await events.flush(transaction);
+        return rows;
       });
+      phase = 'model';
 
       // model
       phaseStart = Date.now();
@@ -132,6 +194,9 @@ class ReviewService {
           outline: analysis.outline,
           ruleFindings: analysis.findings,
         });
+      } catch (err) {
+        modelFailure = { message: failureMessage(err), ms: Date.now() - phaseStart };
+        throw err;
       } finally {
         // Kept on failure too: "the model timed out after 120 s" is worth seeing.
         timings.model = Date.now() - phaseStart;
@@ -141,21 +206,53 @@ class ReviewService {
         console.warn(`[review ${reviewId}] dropped ${result.rejected.length} finding(s)`, result.rejected);
       }
 
-      const toChecking = await reviewDao.updateIfStatus(reviewId, ['running'], {
-        phase: 'checking',
-        phaseTimings: { ...timings },
-        rejectedCount: result.rejected.length,
-        duplicateCount: result.duplicates,
-        ...usageColumns(result.usage),
+      const modelResult = result;
+      await db.transaction(async (transaction) => {
+        const toChecking = await reviewDao.updateIfStatus(
+          reviewId,
+          ['running'],
+          {
+            phase: 'checking',
+            phaseTimings: { ...timings },
+            rejectedCount: modelResult.rejected.length,
+            duplicateCount: modelResult.duplicates,
+            ...usageColumns(modelResult.usage),
+          },
+          transaction,
+        );
+        if (!toChecking) throw new SupersededError();
+        const usage = modelResult.usage;
+        events.add(
+          event('model.called', {
+            provider: llmService.providerName,
+            model: usage?.model ?? null,
+            promptVersion: PROMPT_VERSION,
+            context,
+            ...modelResult.sent,
+            inputTokens: usage?.inputTokens ?? null,
+            outputTokens: usage?.outputTokens ?? null,
+            cacheReadTokens: usage?.cacheReadTokens ?? null,
+            cacheWriteTokens: usage?.cacheWriteTokens ?? null,
+            totalInputTokens: usage ? totalInputTokens(usage) : null,
+            costUsd: usage?.costUsd ?? null,
+            costSource: usage?.costSource ?? null,
+            ms: timings.model!,
+          }),
+          ...modelResult.rejected.map((r) =>
+            event('model.finding_rejected', { reason: r.reason, raw: rawSuggestion(r.finding) }),
+          ),
+          ...modelResult.duplicateHits.map((d) => event('model.duplicate', d)),
+        );
+        await events.flush(transaction);
       });
-      if (!toChecking) throw new SupersededError();
+      phase = 'checking';
 
       // checking
       phaseStart = Date.now();
       const check = (source: FindingSource, ruleId: string | null, fix: FixReplacement | null | undefined) =>
         fix ? this.checkOne(reviewId, { source, ruleId, fix }, code, language, context) : Promise.resolve(undefined);
       const ruleChecks = await Promise.all(analysis.findings.map((f) => check('rule', f.ruleId, f.fix)));
-      const modelChecks = await Promise.all(result.findings.map((f) => check('model', null, f.fix)));
+      const modelChecks = await Promise.all(modelResult.findings.map((f) => check('model', null, f.fix)));
       timings.checking = Date.now() - phaseStart;
 
       // done
@@ -167,12 +264,38 @@ class ReviewService {
           transaction,
         );
         if (!finished) throw new SupersededError();
+        const checkedEvents = [];
         for (let i = 0; i < ruleRows.length; i++) {
           const checked = ruleChecks[i];
-          if (checked) await findingDao.setFixCheck(ruleRows[i].id, checked, transaction);
+          if (!checked) continue;
+          await findingDao.setFixCheck(ruleRows[i].id, checked, transaction);
+          checkedEvents.push(fixCheckedEvent(ruleRows[i].id, 'rule', ruleRows[i].ruleId ?? null, checked));
         }
-        await findingDao.createModelFindings(reviewId, result.findings, modelChecks, transaction);
+        const modelRows = await findingDao.createModelFindings(reviewId, modelResult.findings, modelChecks, transaction);
+        modelRows.forEach((row, i) => {
+          const checked = modelChecks[i];
+          if (checked) checkedEvents.push(fixCheckedEvent(row.id, 'model', null, checked));
+        });
         await snippetDao.setReviewStatusIfLatest(snippetId, reviewId, 'reviewed', transaction);
+        events.add(
+          ...modelResult.findings.map((f) =>
+            event('model.finding_kept', {
+              lineStart: f.lineStart,
+              lineEnd: f.lineEnd,
+              severity: f.severity,
+              category: f.category,
+              hasFix: !!f.fix,
+            }),
+          ),
+          ...checkedEvents,
+          event('review.done', {
+            ms: Date.now() - runStart,
+            findings: ruleRows.length + modelRows.length,
+            ruleFindings: ruleRows.length,
+            modelFindings: modelRows.length,
+          }),
+        );
+        await events.flush(transaction, { final: true });
       });
     } catch (err) {
       if (err instanceof SupersededError) {
@@ -180,8 +303,9 @@ class ReviewService {
         return;
       }
       console.error(`[review ${reviewId}] failed`, err, err instanceof LlmError ? err.cause : '');
-      // Only our own LlmError messages are safe and useful to show the user.
-      const message = err instanceof LlmError ? toUserMessage(err.message) : 'The review failed unexpectedly';
+      const message = failureMessage(err);
+      // Events added for a transaction that never committed describe nothing that was saved.
+      events.discard();
       await db
         .transaction(async (transaction) => {
           const failed = await reviewDao.updateIfStatus(
@@ -190,7 +314,11 @@ class ReviewService {
             { status: 'failed', phase: 'failed', phaseTimings: { ...timings }, error: message, completedAt: new Date() },
             transaction,
           );
-          if (failed) await snippetDao.setReviewStatusIfLatest(snippetId, reviewId, 'failed', transaction);
+          if (!failed) return;
+          await snippetDao.setReviewStatusIfLatest(snippetId, reviewId, 'failed', transaction);
+          if (modelFailure) events.add(event('model.failed', modelFailure));
+          events.add(event('review.failed', { phase, message, ms: Date.now() - runStart }));
+          await events.flush(transaction, { final: true });
         })
         .catch((saveErr) => console.error(`[review ${reviewId}] could not record failure`, saveErr));
     }
@@ -224,12 +352,20 @@ class ReviewService {
         {
           status: 'failed',
           phase: 'failed',
-          error: 'The server restarted before this review finished. Run it again.',
+          error: INTERRUPTED_MESSAGE,
           completedAt: new Date(),
         },
         transaction,
       );
       await snippetDao.setReviewStatus(active.map((r) => r.snippetId), 'failed', transaction);
+      for (const r of active) {
+        const since = (r.startedAt ?? r.createdAt).getTime();
+        await reviewEventService.append(
+          r.id,
+          [event('review.failed', { phase: r.phase, message: INTERRUPTED_MESSAGE, ms: Math.max(0, Date.now() - since) })],
+          transaction,
+        );
+      }
     });
     return active.length;
   }

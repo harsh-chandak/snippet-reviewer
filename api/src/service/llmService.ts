@@ -1,10 +1,10 @@
 import { anthropicProvider } from './llm/anthropicProvider';
 import { claudeHeadlessProvider } from './llm/claudeHeadlessProvider';
 import { fakeProvider } from './llm/fakeProvider';
-import { buildReviewPrompt, REVIEW_SYSTEM_PROMPT } from './llm/prompt';
+import { buildReviewPrompt, MAX_OUTLINE_ITEMS, REVIEW_SYSTEM_PROMPT } from './llm/prompt';
 import { findingValidator, fixValidator, LlmFinding, MAX_FINDINGS, reviewJsonSchema } from './llm/reviewSchema';
 import { LlmError, LlmProvider, LlmUsage } from './llm/types';
-import { CodeContext, Language } from '../model/constants';
+import { CATEGORIES, CodeContext, Language } from '../model/constants';
 import { OutlineItem, RuleFinding } from './analysis/types';
 import { codeLines } from '../utils/codeLines';
 
@@ -37,13 +37,30 @@ export interface ReviewInput {
 // Tokens and cost of one model call; declared next to the providers that fill it in.
 export type { LlmUsage };
 
+// What the prompt carried besides the code, for the event log.
+export interface PromptSent {
+  promptChars: number;
+  hintsSent: number; // rule findings listed as already reported
+  outlineItemsSent: number;
+}
+
+// A model finding dropped because a rule had already reported it: where, and which rule.
+export interface DuplicateHit {
+  lineStart: number;
+  category: (typeof CATEGORIES)[number];
+  ruleId: string;
+}
+
 export interface ReviewResult {
   findings: LlmFinding[];
-  // Model findings dropped because a rule already reported the same thing.
+  // Model findings dropped because a rule already reported the same thing: how many, and each one.
   duplicates: number;
+  duplicateHits: DuplicateHit[];
   usage: LlmUsage | null;
   // Findings we threw away, and why. Worth logging: a rising count means the prompt or model changed.
+  // `finding` is the model's suggestion exactly as it came.
   rejected: { finding: unknown; reason: string }[];
+  sent: PromptSent;
 }
 
 class LlmService {
@@ -54,9 +71,15 @@ class LlmService {
   }
 
   async reviewSnippet(input: ReviewInput): Promise<ReviewResult> {
+    const prompt = buildReviewPrompt(input);
+    const sent: PromptSent = {
+      promptChars: prompt.length,
+      hintsSent: input.ruleFindings.length,
+      outlineItemsSent: Math.min(input.outline.length, MAX_OUTLINE_ITEMS),
+    };
     const { output, usage } = await this.provider.generateStructured({
       system: REVIEW_SYSTEM_PROMPT,
-      prompt: buildReviewPrompt(input),
+      prompt,
       jsonSchema: reviewJsonSchema,
     });
 
@@ -68,8 +91,13 @@ class LlmService {
     const lineCount = codeLines(input.code).length;
     // The prompt lists the rule findings as already reported; a model finding on the same first
     // line and category is that same finding again.
-    const reported = new Set(input.ruleFindings.map((f) => `${f.lineStart}:${f.category}`));
-    const result: ReviewResult = { findings: [], rejected: [], duplicates: 0, usage };
+    // line:category -> the first rule that reported it.
+    const reported = new Map<string, string>();
+    for (const f of input.ruleFindings) {
+      const key = `${f.lineStart}:${f.category}`;
+      if (!reported.has(key)) reported.set(key, f.ruleId);
+    }
+    const result: ReviewResult = { findings: [], rejected: [], duplicates: 0, duplicateHits: [], usage, sent };
 
     for (const item of items) {
       const { error, value } = findingValidator.validate(item, { stripUnknown: true });
@@ -80,6 +108,11 @@ class LlmService {
         result.rejected.push({ finding: item, reason: `line ${value.lineEnd} is past the end (${lineCount} lines)` });
       } else if (reported.has(`${value.lineStart}:${value.category}`)) {
         result.duplicates++;
+        result.duplicateHits.push({
+          lineStart: value.lineStart,
+          category: value.category,
+          ruleId: reported.get(`${value.lineStart}:${value.category}`)!,
+        });
       } else if (result.findings.length >= MAX_FINDINGS) {
         result.rejected.push({ finding: item, reason: `over the ${MAX_FINDINGS}-finding limit` });
       } else {

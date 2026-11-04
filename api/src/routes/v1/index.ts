@@ -23,6 +23,11 @@ v1Route.post(
   asyncHandler((req, res) => reviewController.start(req, res)),
 );
 v1Route.get('/reviews/:id', validate(idParamsSchema, 'params'), asyncHandler((req, res) => reviewController.get(req, res)));
+v1Route.get(
+  '/reviews/:id/events',
+  validate(idParamsSchema, 'params'),
+  asyncHandler((req, res) => reviewController.events(req, res)),
+);
 
 v1Route.patch(
   '/findings/:id',
