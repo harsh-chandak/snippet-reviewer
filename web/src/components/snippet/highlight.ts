@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import type { CSSProperties } from 'react';
 import type { HighlighterCore } from 'shiki/core';
+import { codeLines } from '@/lib/codeLines';
 import type { Language } from '@/lib/types';
 
 // One coloured run of text on a line. `style` carries the light colour as `color` and the
@@ -67,14 +68,28 @@ function toReactStyle(css: Record<string, string> | undefined): CSSProperties {
   return style as CSSProperties;
 }
 
-// Tokens per line, one array per line of `code` split on '\n' (the API counts lines the
-// same way, so finding line numbers index straight into this). Null for plain text.
+// Lines longer than this are shown as plain text. One very long line (minified code, a pasted
+// JSON blob) otherwise keeps shiki busy on the main thread for up to a minute: its own time
+// limit doesn't apply to the JavaScript regex engine.
+const MAX_HIGHLIGHT_LINE = 2000;
+
+// Tokens per line, one array per line of codeLines(code) (the API numbers lines the same way,
+// so finding line numbers index straight into this). Null for plain text.
 export async function tokenizeLines(code: string, language: Language): Promise<CodeToken[][] | null> {
   if (language === 'other') return null;
   const hl = await getHighlighter();
   // loadLanguage accepts the module promise directly; it ignores a grammar already loaded.
   await hl.loadLanguage(GRAMMARS[language]() as Parameters<HighlighterCore['loadLanguage']>[0]);
-  const { tokens } = hl.codeToTokens(code.replace(/\r\n?/g, '\n'), { lang: language, themes: THEMES });
+  // Give shiki exactly the rows CodeView draws. A lone \r inside a line would otherwise be a
+  // line break to shiki but not to us, shifting every highlighted line after it.
+  const text = codeLines(code)
+    .map((line) => line.replace(/\r$/, '').replace(/\r/g, ' '))
+    .join('\n');
+  const { tokens } = hl.codeToTokens(text, {
+    lang: language,
+    themes: THEMES,
+    tokenizeMaxLineLength: MAX_HIGHLIGHT_LINE,
+  });
   return tokens.map((line) => line.map((t) => ({ content: t.content, style: toReactStyle(t.htmlStyle) })));
 }
 
