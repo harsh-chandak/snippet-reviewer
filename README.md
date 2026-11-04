@@ -7,7 +7,7 @@ Paste a code snippet and get a review in two parts. First, deterministic rules r
 **With an API key (one command):**
 
 ```bash
-cp .env.example .env    # set LLM_PROVIDER=anthropic, LLM_MODEL=claude-sonnet-5-5 and ANTHROPIC_API_KEY
+cp .env.example .env    # in .env: switch to Mode B and paste your ANTHROPIC_API_KEY
 docker compose up --build
 ```
 
@@ -17,7 +17,7 @@ docker compose up --build
 
 The API runs its migrations when it starts, so a fresh database gets its tables automatically. Each review's cost is its token counts times the model's list price, from a small dated table in `api/src/service/llm/prices.ts` (the API reports tokens, never dollars). To use other prices, set all four `LLM_PRICE_*_PER_MTOK` values. A model that is neither listed nor configured shows its token counts and "cost not configured". It never guesses a price.
 
-**With a Claude Code login instead of a key** (how I developed it): the default provider, `claude-headless`, runs the local `claude -p` CLI, so the API has to run on your machine rather than in Docker.
+**With a Claude Code login instead of a key** (how I developed it): Mode A in `.env.example`, already selected, runs the local `claude -p` CLI on your own login, so the API has to run on your machine rather than in Docker.
 
 ```bash
 cp .env.example .env
