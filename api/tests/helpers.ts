@@ -8,7 +8,7 @@ import { fakeProvider } from '../src/service/llm/fakeProvider';
 
 // Guard rails: these tests truncate tables, so they must only ever see the test database,
 // and they must never reach a real model.
-if (!/\/snippets_test$/.test(process.env.DATABASE_URL ?? '')) {
+if (!/\/snippets_test[a-z0-9_]*$/.test(process.env.DATABASE_URL ?? '')) {
   throw new Error(`Tests must run against snippets_test, got DATABASE_URL=${process.env.DATABASE_URL}`);
 }
 if (process.env.LLM_PROVIDER !== 'fake') {
