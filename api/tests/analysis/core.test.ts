@@ -387,6 +387,19 @@ describe('checkFix: model fix locality', () => {
     expect(result.detail!.note).toContain('replaces 13 lines for a finding on lines 5-6');
   });
 
+  it('a fix that writes more than the finding plus 10 lines fails, even when it replaces only its own line', async () => {
+    const sixty = Array.from({ length: 60 }, (_, i) => `const w${i} = ${i};`).join('\n');
+    const result = await checkFix(model(3, 3, { lineStart: 3, lineEnd: 3, replacement: sixty }), twenty, 'javascript');
+    expect(result.fixCheck).toBe('failed');
+    expect(result.detail!.note).toContain('the fix writes 60 lines for a finding on line 3, more than the finding plus 10');
+  });
+
+  it('a fix that writes exactly the finding plus 10 lines is allowed', async () => {
+    const eleven = Array.from({ length: 11 }, (_, i) => `const w${i} = ${i};`).join('\n');
+    const result = await checkFix(model(3, 3, { lineStart: 3, lineEnd: 3, replacement: eleven }), twenty, 'javascript');
+    expect(result.fixCheck).toBe('passed');
+  });
+
   it('a fix inside its finding passes', async () => {
     const result = await checkFix(model(3, 4, { lineStart: 3, lineEnd: 3, replacement: 'const v3 = 30;' }), twenty, 'javascript');
     expect(result.fixCheck).toBe('passed');
