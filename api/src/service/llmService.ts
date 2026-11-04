@@ -2,8 +2,8 @@ import { anthropicProvider } from './llm/anthropicProvider';
 import { claudeHeadlessProvider } from './llm/claudeHeadlessProvider';
 import { fakeProvider } from './llm/fakeProvider';
 import { buildReviewPrompt, REVIEW_SYSTEM_PROMPT } from './llm/prompt';
-import { findingValidator, LlmFinding, MAX_FINDINGS, reviewJsonSchema } from './llm/reviewSchema';
-import { LlmError, LlmProvider } from './llm/types';
+import { findingValidator, fixValidator, LlmFinding, MAX_FINDINGS, reviewJsonSchema } from './llm/reviewSchema';
+import { LlmError, LlmProvider, LlmUsage } from './llm/types';
 import { CodeContext, Language } from '../model/constants';
 import { OutlineItem, RuleFinding } from './analysis/types';
 import { codeLines } from '../utils/codeLines';
@@ -34,17 +34,8 @@ export interface ReviewInput {
   ruleFindings: RuleFinding[];
 }
 
-// Tokens and cost of one model call. costUsd is null when nothing can price it: the CLI reports
-// its own estimate ('cli'); the API provider prices tokens from the LLM_PRICE_* settings ('price-config').
-export interface LlmUsage {
-  model: string;
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
-  costUsd: number | null;
-  costSource: 'cli' | 'price-config' | null;
-}
+// Tokens and cost of one model call; declared next to the providers that fill it in.
+export type { LlmUsage };
 
 export interface ReviewResult {
   findings: LlmFinding[];
@@ -62,20 +53,23 @@ class LlmService {
     return this.provider.name;
   }
 
-  async reviewSnippet({ language, code }: ReviewInput): Promise<ReviewResult> {
-    const raw = await this.provider.generateStructured({
+  async reviewSnippet(input: ReviewInput): Promise<ReviewResult> {
+    const { output, usage } = await this.provider.generateStructured({
       system: REVIEW_SYSTEM_PROMPT,
-      prompt: buildReviewPrompt(language, code),
+      prompt: buildReviewPrompt(input),
       jsonSchema: reviewJsonSchema,
     });
 
-    const items = (raw as { findings?: unknown })?.findings;
+    const items = (output as { findings?: unknown })?.findings;
     if (!Array.isArray(items)) {
       throw new LlmError('The model returned an answer without a findings list');
     }
 
-    const lineCount = codeLines(code).length;
-    const result: ReviewResult = { findings: [], rejected: [], duplicates: 0, usage: null };
+    const lineCount = codeLines(input.code).length;
+    // The prompt lists the rule findings as already reported; a model finding on the same first
+    // line and category is that same finding again.
+    const reported = new Set(input.ruleFindings.map((f) => `${f.lineStart}:${f.category}`));
+    const result: ReviewResult = { findings: [], rejected: [], duplicates: 0, usage };
 
     for (const item of items) {
       const { error, value } = findingValidator.validate(item, { stripUnknown: true });
@@ -84,15 +78,25 @@ class LlmService {
       } else if (value.lineEnd > lineCount) {
         // The model pointed at a line that doesn't exist.
         result.rejected.push({ finding: item, reason: `line ${value.lineEnd} is past the end (${lineCount} lines)` });
+      } else if (reported.has(`${value.lineStart}:${value.category}`)) {
+        result.duplicates++;
       } else if (result.findings.length >= MAX_FINDINGS) {
         result.rejected.push({ finding: item, reason: `over the ${MAX_FINDINGS}-finding limit` });
       } else {
-        result.findings.push(value);
+        result.findings.push({ ...value, fix: checkedFix(value.fix, lineCount) });
       }
     }
 
     return result;
   }
+}
+
+// The model's fix if it is well formed and inside the snippet, else null.
+function checkedFix(fix: unknown, lineCount: number): LlmFinding['fix'] {
+  if (fix === undefined || fix === null) return null;
+  const { error, value } = fixValidator.validate(fix, { stripUnknown: true });
+  if (error || value.lineEnd > lineCount) return null;
+  return value;
 }
 
 export const llmService = new LlmService();
