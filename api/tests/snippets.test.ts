@@ -35,6 +35,28 @@ describe('POST /snippets', () => {
     expect(stored).toMatchObject({ id: res.body.data.id, title: 'Add', language: 'python', code });
   });
 
+  it('stores a context the user sets, and stores auto or no context as null (detect it)', async () => {
+    const base = { title: 'ctx', language: 'javascript', code: 'const a = 1;' };
+    const set = await api().post(`${V1}/snippets`).send({ ...base, context: 'frontend' });
+    const auto = await api().post(`${V1}/snippets`).send({ ...base, context: 'auto' });
+    const none = await api().post(`${V1}/snippets`).send(base);
+
+    expect([set.status, auto.status, none.status]).toEqual([201, 201, 201]);
+    expect(set.body.data.context).toBe('frontend');
+    expect(auto.body.data.context).toBeNull();
+    expect(none.body.data.context).toBeNull();
+    expect((await getSnippet(set.body.data.id)).context).toBe('frontend');
+  });
+
+  it('answers 400 for a context outside CODE_CONTEXTS', async () => {
+    const res = await api()
+      .post(`${V1}/snippets`)
+      .send({ title: 'ctx', language: 'javascript', code: 'const a = 1;', context: 'mobile' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.data).toHaveProperty('context');
+  });
+
   it('answers 400 with a message per field for an empty title, unknown language and blank code', async () => {
     const res = await api().post(`${V1}/snippets`).send({ title: '   ', language: 'cobol', code: '  \n  ' });
 

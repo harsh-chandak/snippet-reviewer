@@ -27,7 +27,7 @@ export const api = () => {
 };
 export { db, fakeProvider };
 
-export type SnippetInput = { title: string; language: string; code: string };
+export type SnippetInput = { title: string; language: string; code: string; context?: string };
 
 export async function resetState() {
   await db.query('TRUNCATE TABLE findings, reviews, snippets RESTART IDENTITY CASCADE');
@@ -76,7 +76,14 @@ export async function createSnippet(overrides: Partial<SnippetInput> = {}) {
   };
   const res = await api().post(`${V1}/snippets`).send(body);
   if (res.status !== 201) throw new Error(`createSnippet failed: ${res.status} ${JSON.stringify(res.body)}`);
-  return res.body.data as { id: number; title: string; language: string; code: string; reviewStatus: string };
+  return res.body.data as {
+    id: number;
+    title: string;
+    language: string;
+    code: string;
+    context: string | null;
+    reviewStatus: string;
+  };
 }
 
 export async function getSnippet(id: number) {
@@ -123,4 +130,23 @@ export function finding(overrides: Record<string, unknown> = {}) {
     suggestedFix: 'Fix it',
     ...overrides,
   };
+}
+
+// Polls GET /reviews/:id until `until` holds for the review, and returns that review. For looking
+// at a review mid-run (rule findings while the model is still answering, say).
+export async function pollReview(
+  reviewId: number,
+  until: (review: any) => boolean,
+  { timeoutMs = 10_000, intervalMs = 20 } = {},
+) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const res = await api().get(`${V1}/reviews/${reviewId}`);
+    if (res.status !== 200) throw new Error(`GET /reviews/${reviewId} returned ${res.status}`);
+    if (until(res.body.data)) return res.body.data;
+    if (Date.now() > deadline) {
+      throw new Error(`Review ${reviewId} never reached the expected state: ${JSON.stringify(res.body.data)}`);
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
 }
