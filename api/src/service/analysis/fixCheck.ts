@@ -73,8 +73,9 @@ function outsideLines(fix: FixReplacement, start: number, end: number): string |
   return parts.length ? parts.join(' and ') : null;
 }
 
-// The locality rule for model fixes: the fix must overlap its finding's lines and may replace at
-// most the finding's span plus MODEL_FIX_EXTRA_LINES. Returns the reason it fails, or null.
+// The locality rule for model fixes: the fix must overlap its finding's lines, and may neither
+// replace nor write more than the finding's span plus MODEL_FIX_EXTRA_LINES. Returns the reason it
+// fails, or null.
 function localityProblem(fix: FixReplacement, lineStart: number, lineEnd: number): string | null {
   const finding = lineRange(lineStart, lineEnd);
   const outside = outsideLines(fix, lineStart, lineEnd);
@@ -85,6 +86,11 @@ function localityProblem(fix: FixReplacement, lineStart: number, lineEnd: number
   const replaced = fix.lineEnd - fix.lineStart + 1;
   if (replaced > span + MODEL_FIX_EXTRA_LINES) {
     return `the fix replaces ${replaced} lines for a finding on ${finding}, more than the finding plus ${MODEL_FIX_EXTRA_LINES}; it touches ${outside} outside the finding`;
+  }
+  // Replacing one line with dozens is the same escape as replacing dozens: bound what it writes too.
+  const written = replacementLines(fix.replacement).length;
+  if (written > span + MODEL_FIX_EXTRA_LINES) {
+    return `the fix writes ${written} lines for a finding on ${finding}, more than the finding plus ${MODEL_FIX_EXTRA_LINES}`;
   }
   return null;
 }
